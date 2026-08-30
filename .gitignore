@@ -1,0 +1,15 @@
+# Build artifacts
+/build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE
+.vscode/
+
+# Runtime data
+/store/*.json
