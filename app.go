@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"my-project/store"
 	"sync"
+	"temp-project/store"
 )
 
 type App struct {

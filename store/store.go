@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"my-project/Get"
 	"os"
 	"path/filepath"
+	"temp-project/Get"
 	"unicode"
 
 	"github.com/go-ole/go-ole"

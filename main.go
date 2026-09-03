@@ -1,18 +1,17 @@
 package main
 
 import (
-	"embed"
-	"my-project/store"
-
 	"context"
+	"embed"
 	"os"
+	"temp-project/store"
 
 	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 )
 
-//go:embed web/static/*
+//go:embed all:frontend/dist
 var assets embed.FS
 
 func NewApp() *App {
@@ -22,12 +21,14 @@ func NewApp() *App {
 func main() {
 	app := NewApp()
 	err := wails.Run(&options.App{
-		Title:            "QQ弹幕",
-		Width:            1024,
-		Height:           768,
-		MinHeight:        800,
-		MinWidth:         600,
-		AssetServer:      &assetserver.Options{Assets: assets},
+		Title:     "QQ弹幕",
+		Width:     1024,
+		Height:    768,
+		MinHeight: 800,
+		MinWidth:  600,
+		AssetServer: &assetserver.Options{
+			Assets: assets,
+		},
 		BackgroundColour: &options.RGBA{R: 123, G: 104, B: 238, A: 1},
 		OnStartup: func(ctx context.Context) {
 			app.startup(ctx)
