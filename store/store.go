@@ -209,10 +209,10 @@ func CreateDesktopShortcut(s string) error {
 	lnkPath := filepath.Join(desktopPath, lnkName)
 	exeDir := filepath.Dir(s)
 	iconFullPath := filepath.Join(exeDir, "app.ico")
-	if _, err := os.Stat(lnkPath); os.IsNotExist(err) {
+	if _, err := os.Stat(iconFullPath); os.IsNotExist(err) {
 		iconFullPath = s + ",0"
 	}
-	WshShell, err := oleutil.CreateObject("Wcript.Shell")
+	WshShell, err := oleutil.CreateObject("WScript.Shell")
 	if err != nil {
 		return err
 	}
@@ -222,7 +222,7 @@ func CreateDesktopShortcut(s string) error {
 		return err
 	}
 	defer dispatch.Release()
-	rawObj, err := oleutil.CallMethod(dispatch, "CreateDesktopShortcut", lnkPath)
+	rawObj, err := oleutil.CallMethod(dispatch, "CreateShortcut", lnkPath)
 	if err != nil {
 		return err
 	}
@@ -246,7 +246,7 @@ func CreateDesktopShortcut(s string) error {
 	if err != nil {
 		return fmt.Errorf("save shortcut failed : %v", err)
 	}
-	log.Panicln("桌面快捷方式已创建图标：", iconFullPath)
+	log.Println("桌面快捷方式已创建图标：", iconFullPath)
 	return nil
 }
 func GetDesktopPath() (string, error) {
