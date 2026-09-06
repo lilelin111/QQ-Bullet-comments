@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"temp-project/Get"
+	"time"
 	"unicode"
 
 	"github.com/go-ole/go-ole"
@@ -26,10 +28,12 @@ type User struct {
 	Password string `json:"password"`
 }
 type Message struct {
-	ID      int64  `json:"id"`
-	UserId  int64  `json:"userid"`
-	Title   string `json:"title"`
-	Message string `json:"message"`
+	ID             int64  `json:"id"`
+	UserId         int64  `json:"userid"`
+	Title          string `json:"title"`
+	Message        string `json:"message"`
+	Time           string `json:"time,omitempty"`
+	NotificationID string `json:"notification_id,omitempty"`
 }
 
 func init() {
@@ -154,24 +158,36 @@ func LoginService(username, password string) (*User, error) {
 	}
 	return u2, nil
 }
-func CreateMessages(title string, u *User) (string, error) {
-	message := Get.GetMessage()
-	newID := int64(1)
-	if len(Users) > 0 {
-		newID = Users[len(Users)-1].ID + 1
+
+func CreateMessages(ctx context.Context, u *User) (*Message, error) {
+	if u == nil {
+		return nil, errors.New("用户不能为空")
 	}
-	Message1 := &Message{
-		ID:      newID,
-		UserId:  u.ID,
-		Title:   title,
-		Message: message,
-	}
-	Messages = append(Messages, *Message1)
-	err := SaveMessage()
+
+	qq, err := Get.NextMessage(ctx, 3*time.Second)
 	if err != nil {
-		return fmt.Sprintf("保存数据失败！"), nil
+		return nil, err
 	}
-	return fmt.Sprintf("保存数据成功！"), nil
+
+	newID := int64(1)
+	if len(Messages) > 0 {
+		newID = Messages[len(Messages)-1].ID + 1
+	}
+
+	message1 := &Message{
+		ID:             newID,
+		UserId:         u.ID,
+		Title:          qq.Title,
+		Message:        qq.Body,
+		Time:           qq.Time,
+		NotificationID: qq.NotificationID,
+	}
+
+	Messages = append(Messages, *message1)
+	if err1 := SaveMessage(); err1 != nil {
+		return nil, err1
+	}
+	return message1, nil
 }
 func ShowGetMessage(UserID int64, Id int) (string, error) {
 	for _, i := range Messages {

@@ -2,10 +2,12 @@ package Get
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,7 +31,7 @@ foreach ($n in $all) {
     }
     if ($app -notmatch 'QQ|腾讯') { continue }
 
-    $texts = @()
+        $texts = @()
     if ($null -ne $n.Notification -and $null -ne $n.Notification.Visual) {
         foreach ($binding in $n.Notification.Visual.Bindings) {
             foreach ($t in $binding.GetTextElements()) {
@@ -38,9 +40,19 @@ foreach ($n in $all) {
         }
     }
 
-    "{0}{1}{2:yyyy-MM-dd HH:mm:ss}{1}{3}" -f $n.Id, [char]9, $n.CreationTime.LocalDateTime, ($texts -join ' | ')
-}
-`
+    $title = ''
+    $body = ''
+    if ($texts.Count -ge 1) {
+        $title = $texts[0]
+    }
+    if ($texts.Count -ge 2) {
+        $body = ($texts[1..($texts.Count-1)] -join ' ')
+    } elseif ($texts.Count -eq 1) {
+        $body = $texts[0]
+    }
+
+    "{0}{1}{2:yyyy-MM-dd HH:mm:ss}{1}{3}{1}{4}" -f $n.Id, [char]9, $n.CreationTime.LocalDateTime, $title, $body
+}`
 
 func queryQQNotifications() ([]string, error) {
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", queryScript)
@@ -58,26 +70,70 @@ func queryQQNotifications() ([]string, error) {
 	return lines, sc.Err()
 }
 
-func GetMessage() string {
-	seen := map[string]bool{}
+var (
+	seenMu sync.Mutex              // seenMu：保护 seen 的并发读写
+	seen   = make(map[string]bool) // seen：记录“已经处理过”的通知 ID
+)
+
+type QQMessage struct {
+	NotificationID string `json:"notification_id"` //通知ID
+	Time           string `json:"time"`            //通知时间
+	Title          string `json:"title"`           //群名
+	Body           string `json:"body"`            //通知内容
+}
+
+func parseLine(line string) (QQMessage, bool) {
+	parts := strings.SplitN(line, "\t", 4)
+	if len(parts) != 3 {
+		return QQMessage{}, false
+	}
+	return QQMessage{
+		NotificationID: parts[0],
+		Time:           parts[1],
+		Title:          parts[2],
+		Body:           parts[3],
+	}, true
+}
+
+func PrimeSeen() {
+	lines, err := queryQQNotifications()
+	if err != nil {
+		return
+	}
+	seenMu.Lock()
+	defer seenMu.Unlock()
+	for _, line := range lines {
+		if m, ok := parseLine(line); ok {
+			seen[m.NotificationID] = true
+		}
+	}
+}
+
+func NextMessage(ctx context.Context, interval time.Duration) (QQMessage, error) { // NextMessage：持续查询，只返回真正的新通知
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
 		lines, err := queryQQNotifications()
 		if err != nil {
-			// 如果查询出错，返回错误信息字符串（或者你也可以选择 return "" 忽略错误）
-			return fmt.Sprintf("查询通知失败: %v", err)
+			return QQMessage{}, fmt.Errorf("查询通知失败: %w", err) // 返回错误，不再把错误当弹幕内容
 		}
-
-		// 如果查询成功，遍历所有行
+		seenMu.Lock()
 		for _, line := range lines {
-			id, _, ok := strings.Cut(line, "\t")
-			if ok && !seen[id] {
-				seen[id] = true
-				// 找到新消息，立刻返回这个字符串，结束本次函数调用
-				return line
+			m, ok := parseLine(line)
+			if !ok {
+				continue
+			}
+			if !seen[m.NotificationID] {
+				seen[m.NotificationID] = true
+				seenMu.Unlock()
+				return m, nil
 			}
 		}
-
-		// 如果这一轮没有新消息，也没有报错，就等 3 秒后再查
-		time.Sleep(3 * time.Second)
+		seenMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return QQMessage{}, ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }

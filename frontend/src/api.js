@@ -25,6 +25,8 @@ function normalize(result) {
     message,
     user: pickUser(result),
     value: message,
+    groupName: String(result?.group_name ?? result?.groupName ?? ''),
+    messageId: Number(result?.message_id ?? result?.messageId ?? 0),
   }
 }
 
@@ -53,8 +55,8 @@ export async function login(username, password) {
   return normalize(result)
 }
 
-export async function createMessage(title, user) {
-  const result = await appApi().CreateMessage(title, userPayload(user))
+export async function createMessage(user) {
+  const result = await appApi().CreateMessage(userPayload(user))
   return normalize(result)
 }
 

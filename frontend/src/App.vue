@@ -8,11 +8,10 @@ const credentials = reactive({
   password: '',
 })
 const currentUser = ref(null)
-const captureTitle = ref('')
 const capturing = ref(false)
 const queryId = ref(0)
 const queryResult = reactive({
-  title: '',
+  group: '',
   message: '',
 })
 const status = ref({ kind: 'idle', text: '就绪' })
@@ -59,7 +58,7 @@ async function submitAuth() {
 
   currentUser.value = result.user
   queryId.value = 0
-  queryResult.title = ''
+  queryResult.group = ''
   queryResult.message = ''
   setStatus('success', result.message)
   pushActivity(`${mode.value === 'login' ? '登录' : '注册'}：${currentUser.value.name}`)
@@ -72,10 +71,6 @@ function logout() {
 }
 
 async function startCapture() {
-  if (!captureTitle.value.trim()) {
-    setStatus('error', '请输入弹幕标题')
-    return
-  }
   if (capturing.value) {
     return
   }
@@ -84,19 +79,19 @@ async function startCapture() {
   setStatus('info', '等待新的 QQ 通知…')
 
   try {
-    const result = await api.createMessage(captureTitle.value.trim(), currentUser.value)
+    const result = await api.createMessage(currentUser.value)
     if (!result.success) {
       setStatus('error', result.message)
       return
     }
 
-    const title = captureTitle.value.trim()
+    const groupName = result.groupName || 'QQ消息'
     records.value.unshift({
       id: nextRecordId.value++,
-      title,
+      group: groupName,
       time: nowText(),
     })
-    pushActivity(`已保存弹幕：${title}`)
+    pushActivity(`已保存弹幕：${groupName}`)
     setStatus('success', result.message)
   } catch (err) {
     setStatus('error', String(err?.message || err))
@@ -112,7 +107,7 @@ async function fetchQuery(kind) {
     return
   }
 
-  const caller = kind === 'title' ? api.showGetTitle : api.showGetMessage
+  const caller = kind === 'group' ? api.showGetTitle : api.showGetMessage
   const result = await caller(currentUser.value.id, id)
 
   if (!result.success) {
@@ -120,8 +115,8 @@ async function fetchQuery(kind) {
     return
   }
 
-  if (kind === 'title') {
-    queryResult.title = result.value
+  if (kind === 'group') {
+    queryResult.group = result.value
   } else {
     queryResult.message = result.value
   }
@@ -207,16 +202,6 @@ async function fetchQuery(kind) {
               <h2>捕获弹幕</h2>
               <span class="live-dot" :class="{ waiting: capturing }"></span>
             </div>
-            <label class="field">
-              <span>标题</span>
-              <input
-                v-model="captureTitle"
-                type="text"
-                maxlength="50"
-                placeholder="本条弹幕的标题"
-                @keyup.enter="startCapture"
-              />
-            </label>
             <button
               class="primary-btn full"
               type="button"
@@ -236,8 +221,8 @@ async function fetchQuery(kind) {
               <input v-model.number="queryId" type="number" min="0" step="1" />
             </label>
             <div class="btn-row">
-              <button class="secondary-btn" type="button" @click="fetchQuery('title')">
-                读取标题
+              <button class="secondary-btn" type="button" @click="fetchQuery('group')">
+                读取群名
               </button>
               <button class="secondary-btn" type="button" @click="fetchQuery('message')">
                 读取内容
@@ -245,8 +230,8 @@ async function fetchQuery(kind) {
             </div>
             <div class="query-result">
               <div>
-                <span class="label-text">标题</span>
-                <p>{{ queryResult.title || '—' }}</p>
+                <span class="label-text">群名</span>
+                <p>{{ queryResult.group || '—' }}</p>
               </div>
               <div>
                 <span class="label-text">内容</span>
@@ -266,7 +251,7 @@ async function fetchQuery(kind) {
             <article v-for="(record, index) in records" :key="record.id" class="record">
               <div class="record-index">{{ index + 1 }}</div>
               <div class="record-main">
-                <strong>{{ record.title }}</strong>
+                <strong>{{ record.group }}</strong>
                 <span>{{ record.time }}</span>
               </div>
             </article>
