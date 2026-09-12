@@ -2,12 +2,13 @@ package Get
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -15,21 +16,39 @@ import (
 // 输出格式：通知ID<TAB>时间<TAB>标题/正文，并只保留 QQ 相关通知。
 const queryScript = `
 $listenerType = [Windows.UI.Notifications.Management.UserNotificationListener, Windows.UI.Notifications.Management, ContentType = WindowsRuntime]
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+
+$asyncOperationTypeName = 'IAsyncOperation' + [char]96 + '1'
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and
+    $_.GetParameters().Count -eq 1 -and
+    $_.GetParameters()[0].ParameterType.Name -eq $asyncOperationTypeName
+})[0]
+
+function Await($WinRtTask, $ResultType) {
+    $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+    $netTask = $asTask.Invoke($null, @($WinRtTask))
+    $netTask.Wait(-1) | Out-Null
+    $netTask.Result
+}
+
 $listener = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
-$status = $listener.RequestAccessAsync().GetAwaiter().GetResult()
+$accessOperation = $listener.RequestAccessAsync()
+$status = Await $accessOperation ([Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus])
 if ($status -ne 'Allowed') {
     Write-Error '没有通知访问权限，请开启 Windows 通知历史记录并允许 QQ 通知'
     exit 1
 }
 
-$all = $listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast).GetAwaiter().GetResult()
+$notificationsOperation = $listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)
+$all = Await $notificationsOperation ([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]])
 
 foreach ($n in $all) {
     $app = ''
     if ($null -ne $n.AppInfo -and $null -ne $n.AppInfo.DisplayInfo) {
         $app = [string]$n.AppInfo.DisplayInfo.DisplayName
     }
-    if ($app -notmatch 'QQ|腾讯') { continue }
+    if ($app -notmatch '^(QQ|QQNT|腾讯QQ)$') { continue }
 
         $texts = @()
     if ($null -ne $n.Notification -and $null -ne $n.Notification.Visual) {
@@ -56,10 +75,12 @@ foreach ($n in $all) {
 
 func queryQQNotifications() ([]string, error) {
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", queryScript)
-	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("查询通知失败: %w", err)
+		return nil, fmt.Errorf("查询通知失败: %w, stderr=%s", err, strings.TrimSpace(stderr.String()))
 	}
 
 	var lines []string
@@ -84,7 +105,7 @@ type QQMessage struct {
 
 func parseLine(line string) (QQMessage, bool) {
 	parts := strings.SplitN(line, "\t", 4)
-	if len(parts) != 3 {
+	if len(parts) != 4 {
 		return QQMessage{}, false
 	}
 	return QQMessage{

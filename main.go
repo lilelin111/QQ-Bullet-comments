@@ -44,12 +44,13 @@ func main() {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.startQQMonitor(ctx)
 	exePath, err := os.Executable()
 	if err != nil {
 		println("获取程序路径失败:", err.Error())
 		return
 	}
-	if err := store.CreateDesktopShortcut(exePath); err != nil {
+	if err1 := store.CreateDesktopShortcut(exePath); err1 != nil {
 		println("创建桌面快捷方式失败：:", err.Error())
 	}
 

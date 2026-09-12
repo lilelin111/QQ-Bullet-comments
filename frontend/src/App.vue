@@ -1,5 +1,6 @@
 <script setup>
-import { reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { EventsOff, EventsOn } from '../wailsjs/runtime/runtime'
 import * as api from './api.js'
 
 const mode = ref('login')
@@ -8,7 +9,6 @@ const credentials = reactive({
   password: '',
 })
 const currentUser = ref(null)
-const capturing = ref(false)
 const queryId = ref(0)
 const queryResult = reactive({
   group: '',
@@ -17,7 +17,28 @@ const queryResult = reactive({
 const status = ref({ kind: 'idle', text: '就绪' })
 const activity = ref([])
 const records = ref([])
+const bullets = ref([])
 const nextRecordId = ref(1)
+const nextBulletId = ref(1)
+const bulletLane = ref(0)
+
+const bulletColor = ref('#ffffff')
+const accentColor = ref('#2dd4bf')
+// 使用 CSS 变量把用户从调色盘选择的颜色应用到整个桌面端界面和弹幕文字。
+const themeStyle = computed(() => ({
+  '--accent': accentColor.value,
+  '--accent-soft': hexToRgba(accentColor.value, 0.13),
+  '--bullet-color': bulletColor.value,
+}))
+
+function hexToRgba(hex, alpha) {
+  const value = hex.replace('#', '')
+  const full = value.length === 3
+    ? value.split('').map((char) => char + char).join('')
+    : value
+  const number = Number.parseInt(full, 16)
+  return `rgba(${(number >> 16) & 255}, ${(number >> 8) & 255}, ${number & 255}, ${alpha})`
+}
 
 function nowText() {
   return new Date().toLocaleTimeString('zh-CN', { hour12: false })
@@ -66,38 +87,71 @@ async function submitAuth() {
 
 function logout() {
   currentUser.value = null
-  capturing.value = false
+  records.value = []
   setStatus('idle', '已退出账号')
 }
 
-async function startCapture() {
-  if (capturing.value) {
+function handleQQMessage(payload) {
+  // Wails 事件数据可能是单个对象，也可能包装在参数数组中，这里统一兼容。
+  const msg = Array.isArray(payload) ? (payload[0] || {}) : (payload || {})
+  const group = String(msg.title ?? msg.group_name ?? 'QQ消息')
+  const content = String(msg.body ?? msg.message ?? '')
+  if (!group && !content) {
     return
   }
 
-  capturing.value = true
-  setStatus('info', '等待新的 QQ 通知…')
+  addRecord(group, content)
+  spawnBullet(group, content)
+  pushActivity(`收到弹幕：${group}`)
+  setStatus('success', '收到新 QQ 消息')
+}
 
-  try {
-    const result = await api.createMessage(currentUser.value)
-    if (!result.success) {
-      setStatus('error', result.message)
-      return
-    }
-
-    const groupName = result.groupName || 'QQ消息'
-    records.value.unshift({
-      id: nextRecordId.value++,
-      group: groupName,
-      time: nowText(),
-    })
-    pushActivity(`已保存弹幕：${groupName}`)
-    setStatus('success', result.message)
-  } catch (err) {
-    setStatus('error', String(err?.message || err))
-  } finally {
-    capturing.value = false
+function handleMonitorError(payload) {
+  // 后端监听失败时把错误显示在状态栏和动态列表中，避免静默失败。
+  const message = Array.isArray(payload) ? String(payload[0] ?? '') : String(payload ?? '')
+  if (!message) {
+    return
   }
+  setStatus('error', message)
+  pushActivity(`监听异常：${message}`)
+}
+
+onMounted(() => {
+  // 后端发现新的 QQ 通知后，通过该事件把群名和内容推送给弹幕层。
+  EventsOn('qq:new-message', handleQQMessage)
+  // 通知权限关闭或查询失败时，通过该事件把原因显示给用户。
+  EventsOn('qq:monitor-error', handleMonitorError)
+  setStatus('info', '正在监听 QQ 通知…')
+})
+
+onBeforeUnmount(() => {
+  EventsOff('qq:new-message')
+  EventsOff('qq:monitor-error')
+})
+
+function addRecord(group, content) {
+  // 把实时收到的 QQ 消息追加到界面记录列表，最新消息显示在最上方。
+  records.value.unshift({
+    id: nextRecordId.value++,
+    group,
+    content,
+    time: nowText(),
+  })
+}
+
+function spawnBullet(group, content) {
+  // 为每条消息分配一个弹道，生成从右向左漂浮的弹幕节点。
+  const id = nextBulletId.value++
+  const lane = bulletLane.value++ % 6
+  bullets.value.push({
+    id,
+    group,
+    content,
+    top: 92 + lane * 48,
+  })
+  window.setTimeout(() => {
+    bullets.value = bullets.value.filter((bullet) => bullet.id !== id)
+  }, 10000)
 }
 
 async function fetchQuery(kind) {
@@ -125,7 +179,7 @@ async function fetchQuery(kind) {
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :style="themeStyle">
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark">Q弹</div>
@@ -143,6 +197,19 @@ async function fetchQuery(kind) {
         <button class="ghost-btn" type="button" @click="logout">退出</button>
       </div>
     </header>
+
+    <!-- 弹幕浮层不拦截鼠标，消息会在这里从右侧漂浮到左侧。 -->
+    <div class="bullet-layer" aria-hidden="true">
+      <span
+        v-for="bullet in bullets"
+        :key="bullet.id"
+        class="bullet"
+        :style="{ top: bullet.top + 'px' }"
+      >
+        <em class="bullet-group">{{ bullet.group }}</em>
+        <span class="bullet-content">{{ bullet.content || bullet.group }}</span>
+      </span>
+    </div>
 
     <main class="page">
       <section v-if="!currentUser" class="auth-wrap">
@@ -199,17 +266,24 @@ async function fetchQuery(kind) {
         <div class="side-column">
           <section class="panel">
             <div class="panel-head">
-              <h2>捕获弹幕</h2>
-              <span class="live-dot" :class="{ waiting: capturing }"></span>
+              <h2>实时监听</h2>
+              <span class="live-dot waiting"></span>
             </div>
-            <button
-              class="primary-btn full"
-              type="button"
-              :disabled="capturing"
-              @click="startCapture"
-            >
-              {{ capturing ? '等待 QQ 通知…' : '开始捕获' }}
-            </button>
+            <p class="capture-state">QQ 通知监听中</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>外观设置</h2>
+            </div>
+            <label class="color-field">
+              <span>弹幕文字颜色</span>
+              <input v-model="bulletColor" type="color" />
+            </label>
+            <label class="color-field">
+              <span>界面主题颜色</span>
+              <input v-model="accentColor" type="color" />
+            </label>
           </section>
 
           <section class="panel">
@@ -251,8 +325,9 @@ async function fetchQuery(kind) {
             <article v-for="(record, index) in records" :key="record.id" class="record">
               <div class="record-index">{{ index + 1 }}</div>
               <div class="record-main">
-                <strong>{{ record.group }}</strong>
-                <span>{{ record.time }}</span>
+                <strong>{{ record.group || 'QQ消息' }}</strong>
+                <span class="record-content">{{ record.content || record.group }}</span>
+                <span class="record-time">{{ record.time }}</span>
               </div>
             </article>
             <div v-if="records.length === 0" class="empty">
@@ -708,6 +783,92 @@ async function fetchQuery(kind) {
 .empty-li {
   color: var(--muted);
   font-size: 13px;
+}
+
+.capture-state {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.color-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+}
+
+.color-field span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.color-field input[type="color"] {
+  width: 52px;
+  height: 32px;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--input);
+  cursor: pointer;
+}
+
+.bullet-layer {
+  position: fixed;
+  inset: 68px 0 0 0;
+  z-index: 80;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.bullet {
+  position: absolute;
+  left: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 86vw;
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(8, 12, 16, 0.42);
+  color: var(--bullet-color);
+  white-space: nowrap;
+  animation: bullet-fly 9s linear forwards;
+  will-change: transform;
+}
+
+.bullet-group {
+  flex: 0 0 auto;
+  color: var(--bullet-color);
+  font-style: normal;
+  font-weight: 800;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.bullet-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+@keyframes bullet-fly {
+  to {
+    transform: translateX(calc(-100vw - 100%));
+  }
+}
+
+.record-main .record-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-main .record-time {
+  font-size: 11px;
 }
 
 .status-bar {
