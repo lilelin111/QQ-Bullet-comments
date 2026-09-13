@@ -1,919 +1,952 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { EventsOff, EventsOn } from '../wailsjs/runtime/runtime'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import {
+  EventsOff,
+  EventsOn,
+  Quit,
+  WindowFullscreen,
+  WindowIsFullscreen,
+  WindowUnfullscreen,
+} from '../wailsjs/runtime/runtime'
 import * as api from './api.js'
 
-const mode = ref('login')
-const credentials = reactive({
+const STORAGE_KEY = 'qq-danmaku-appearance'
+
+const defaults = {
+  background: '#0f172a',
+  title: '#22d3ee',
+  content: '#f8fafc',
+  scale: 1,
+}
+
+function loadAppearance() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+    return {
+      background: validColor(saved.background, defaults.background),
+      title: validColor(saved.title, defaults.title),
+      content: validColor(saved.content, defaults.content),
+      scale: boundedScale(saved.scale),
+    }
+  } catch {
+    return { ...defaults }
+  }
+}
+
+function validColor(value, fallback) {
+  return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? value : fallback
+}
+
+function boundedScale(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? Math.min(2, Math.max(0.75, number)) : defaults.scale
+}
+
+const appearance = reactive(loadAppearance())
+const settingsOpen = ref(true)
+const isFullscreen = ref(true)
+const currentUser = ref(null)
+const authMode = ref('login')
+const authBusy = ref(false)
+const authError = ref('')
+const authForm = reactive({
   username: '',
   password: '',
 })
-const currentUser = ref(null)
-const queryId = ref(0)
-const queryResult = reactive({
-  group: '',
-  message: '',
-})
-const status = ref({ kind: 'idle', text: '就绪' })
-const activity = ref([])
-const records = ref([])
 const bullets = ref([])
-const nextRecordId = ref(1)
-const nextBulletId = ref(1)
-const bulletLane = ref(0)
+const notice = ref('')
+const laneStep = ref(88)
+const pendingMessages = []
+const laneReadyAt = []
 
-const bulletColor = ref('#ffffff')
-const accentColor = ref('#2dd4bf')
-// 使用 CSS 变量把用户从调色盘选择的颜色应用到整个桌面端界面和弹幕文字。
+let nextBulletId = 1
+let queueTimer = null
+let noticeTimer = null
+
 const themeStyle = computed(() => ({
-  '--accent': accentColor.value,
-  '--accent-soft': hexToRgba(accentColor.value, 0.13),
-  '--bullet-color': bulletColor.value,
+  '--bullet-background': appearance.background,
+  '--bullet-title': appearance.title,
+  '--bullet-content': appearance.content,
+  '--bullet-scale': String(appearance.scale),
 }))
 
-function hexToRgba(hex, alpha) {
-  const value = hex.replace('#', '')
-  const full = value.length === 3
-    ? value.split('').map((char) => char + char).join('')
-    : value
-  const number = Number.parseInt(full, 16)
-  return `rgba(${(number >> 16) & 255}, ${(number >> 8) & 255}, ${number & 255}, ${alpha})`
+watch(
+  appearance,
+  (value) => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
+    updateLanes()
+  },
+  { deep: true },
+)
+
+function unwrapPayload(payload) {
+  let current = payload
+  while (Array.isArray(current) && current.length === 1) {
+    current = current[0]
+  }
+  if (Array.isArray(current)) {
+    return current[0] ?? {}
+  }
+  return current ?? {}
 }
 
-function nowText() {
-  return new Date().toLocaleTimeString('zh-CN', { hour12: false })
-}
+function normalizeMessage(payload) {
+  const value = unwrapPayload(payload)
 
-function setStatus(kind, text) {
-  status.value = { kind, text }
-}
+  if (typeof value === 'string') {
+    // 后端原始通知格式为：ID<TAB>时间<TAB>群名<TAB>内容。
+    const fields = value.split('\t', 4)
+    if (fields.length === 4) {
+      return {
+        title: fields[2].trim(),
+        content: fields[3].trim(),
+      }
+    }
+    return { title: 'QQ消息', content: value.trim() }
+  }
 
-function pushActivity(text) {
-  activity.value.unshift({
-    text,
-    time: nowText(),
-  })
-  if (activity.value.length > 9) {
-    activity.value.pop()
+  return {
+    title: String(value.title ?? value.group_name ?? value.groupName ?? 'QQ消息').trim(),
+    content: String(value.body ?? value.message ?? value.content ?? '').trim(),
   }
 }
 
-function switchMode(next) {
-  mode.value = next
-  status.value = { kind: 'idle', text: '就绪' }
-}
-
-async function submitAuth() {
-  if (!credentials.username.trim() || !credentials.password) {
-    setStatus('error', '用户名和密码不能为空')
-    return
-  }
-
-  const caller = mode.value === 'login' ? api.login : api.register
-  const result = await caller(credentials.username.trim(), credentials.password)
-
-  if (!result.success || !result.user) {
-    setStatus('error', result.message)
-    return
-  }
-
-  currentUser.value = result.user
-  queryId.value = 0
-  queryResult.group = ''
-  queryResult.message = ''
-  setStatus('success', result.message)
-  pushActivity(`${mode.value === 'login' ? '登录' : '注册'}：${currentUser.value.name}`)
-}
-
-function logout() {
-  currentUser.value = null
-  records.value = []
-  setStatus('idle', '已退出账号')
+function pushNotice(message) {
+  notice.value = message
+  window.clearTimeout(noticeTimer)
+  noticeTimer = window.setTimeout(() => {
+    notice.value = ''
+  }, 4200)
 }
 
 function handleQQMessage(payload) {
-  // Wails 事件数据可能是单个对象，也可能包装在参数数组中，这里统一兼容。
-  const msg = Array.isArray(payload) ? (payload[0] || {}) : (payload || {})
-  const group = String(msg.title ?? msg.group_name ?? 'QQ消息')
-  const content = String(msg.body ?? msg.message ?? '')
-  if (!group && !content) {
+  const message = normalizeMessage(payload)
+  if (!message.content && !message.title) {
     return
   }
 
-  addRecord(group, content)
-  spawnBullet(group, content)
-  pushActivity(`收到弹幕：${group}`)
-  setStatus('success', '收到新 QQ 消息')
+  pendingMessages.push(message)
+  pumpQueue()
 }
 
 function handleMonitorError(payload) {
-  // 后端监听失败时把错误显示在状态栏和动态列表中，避免静默失败。
-  const message = Array.isArray(payload) ? String(payload[0] ?? '') : String(payload ?? '')
-  if (!message) {
-    return
-  }
-  setStatus('error', message)
-  pushActivity(`监听异常：${message}`)
+  const message = unwrapPayload(payload)
+  pushNotice(String(message || 'QQ 通知监听失败'))
 }
 
-onMounted(() => {
-  // 后端发现新的 QQ 通知后，通过该事件把群名和内容推送给弹幕层。
+function updateLanes() {
+  const availableHeight = Math.max(240, window.innerHeight - 20)
+  const nextStep = Math.round(88 * appearance.scale)
+  const nextCount = Math.max(3, Math.floor(availableHeight / nextStep))
+
+  laneStep.value = nextStep
+
+  while (laneReadyAt.length < nextCount) {
+    laneReadyAt.push(0)
+  }
+  if (laneReadyAt.length > nextCount) {
+    laneReadyAt.length = nextCount
+  }
+
+  pumpQueue()
+}
+
+function pumpQueue() {
+  window.clearTimeout(queueTimer)
+  queueTimer = null
+
+  const now = performance.now()
+  let lane = laneReadyAt.findIndex((readyAt) => readyAt <= now)
+
+  while (pendingMessages.length > 0 && lane >= 0) {
+    const message = pendingMessages.shift()
+    const duration = bulletDuration(message)
+    const id = nextBulletId++
+
+    bullets.value.push({
+      id,
+      title: message.title || 'QQ消息',
+      content: message.content || message.title || '新消息',
+      top: 10 + lane * laneStep.value,
+      duration,
+    })
+
+    // 留出短暂间隔，避免同一轨道连续弹幕紧贴在一起。
+    laneReadyAt[lane] = now + duration * 1000 + 320
+    lane = laneReadyAt.findIndex((readyAt) => readyAt <= now)
+  }
+
+  if (pendingMessages.length > 0 && laneReadyAt.length > 0) {
+    const nextReadyAt = Math.min(...laneReadyAt)
+    queueTimer = window.setTimeout(pumpQueue, Math.max(80, nextReadyAt - performance.now()))
+  }
+}
+
+function bulletDuration(message) {
+  const textLength = `${message.title}${message.content}`.length
+  const estimatedWidth = Math.min(1440, 120 + textLength * 18)
+  const travelDistance = window.innerWidth + estimatedWidth
+  const speed = 210 + Math.min(70, textLength * 0.8)
+  return Math.min(16, Math.max(6.5, travelDistance / speed))
+}
+
+function removeBullet(id) {
+  bullets.value = bullets.value.filter((bullet) => bullet.id !== id)
+}
+
+function clearBullets() {
+  pendingMessages.length = 0
+  bullets.value = []
+  laneReadyAt.fill(0)
+}
+
+function resetAppearance() {
+  Object.assign(appearance, defaults)
+}
+
+function playPreview() {
+  handleQQMessage({
+    title: '测试群',
+    body: '这是一条桌面弹幕漂浮效果预览',
+  })
+}
+
+function switchAuthMode(mode) {
+  authMode.value = mode
+  authError.value = ''
+  authForm.password = ''
+}
+
+async function submitAuth() {
+  const username = authForm.username.trim()
+  if (!username || !authForm.password) {
+    authError.value = '请输入用户名和密码'
+    return
+  }
+
+  authBusy.value = true
+  authError.value = ''
+  try {
+    const caller = authMode.value === 'login' ? api.login : api.register
+    const result = await caller(username, authForm.password)
+    if (!result.success || !result.user) {
+      authError.value = result.message
+      return
+    }
+
+    currentUser.value = result.user
+    authForm.password = ''
+    pushNotice(result.message)
+  } catch (error) {
+    authError.value = error?.message || '账号操作失败'
+  } finally {
+    authBusy.value = false
+  }
+}
+
+async function logoutUser() {
+  authBusy.value = true
+  authError.value = ''
+  try {
+    const result = await api.logout()
+    if (!result.success) {
+      authError.value = result.message
+      return
+    }
+
+    currentUser.value = null
+    authMode.value = 'login'
+    authForm.password = ''
+    clearBullets()
+    pushNotice(result.message)
+  } catch (error) {
+    authError.value = error?.message || '退出登录失败'
+  } finally {
+    authBusy.value = false
+  }
+}
+
+async function toggleWindowMode() {
+  try {
+    if (isFullscreen.value) {
+      WindowUnfullscreen()
+    } else {
+      WindowFullscreen()
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, 180))
+    isFullscreen.value = await WindowIsFullscreen()
+    updateLanes()
+  } catch {
+    pushNotice('无法切换窗口模式')
+  }
+}
+
+function exitApp() {
+  try {
+    Quit()
+  } catch {
+    pushNotice('当前环境无法退出应用')
+  }
+}
+
+onMounted(async () => {
+  try {
+    isFullscreen.value = await WindowIsFullscreen()
+  } catch {
+    isFullscreen.value = true
+  }
+  updateLanes()
+  window.addEventListener('resize', updateLanes)
   EventsOn('qq:new-message', handleQQMessage)
-  // 通知权限关闭或查询失败时，通过该事件把原因显示给用户。
   EventsOn('qq:monitor-error', handleMonitorError)
-  setStatus('info', '正在监听 QQ 通知…')
 })
 
 onBeforeUnmount(() => {
+  window.clearTimeout(queueTimer)
+  window.clearTimeout(noticeTimer)
+  window.removeEventListener('resize', updateLanes)
   EventsOff('qq:new-message')
   EventsOff('qq:monitor-error')
 })
-
-function addRecord(group, content) {
-  // 把实时收到的 QQ 消息追加到界面记录列表，最新消息显示在最上方。
-  records.value.unshift({
-    id: nextRecordId.value++,
-    group,
-    content,
-    time: nowText(),
-  })
-}
-
-function spawnBullet(group, content) {
-  // 为每条消息分配一个弹道，生成从右向左漂浮的弹幕节点。
-  const id = nextBulletId.value++
-  const lane = bulletLane.value++ % 6
-  bullets.value.push({
-    id,
-    group,
-    content,
-    top: 92 + lane * 48,
-  })
-  window.setTimeout(() => {
-    bullets.value = bullets.value.filter((bullet) => bullet.id !== id)
-  }, 10000)
-}
-
-async function fetchQuery(kind) {
-  const id = Number(queryId.value)
-  if (!Number.isInteger(id) || id < 0) {
-    setStatus('error', '请输入有效的消息编号')
-    return
-  }
-
-  const caller = kind === 'group' ? api.showGetTitle : api.showGetMessage
-  const result = await caller(currentUser.value.id, id)
-
-  if (!result.success) {
-    setStatus('error', result.message)
-    return
-  }
-
-  if (kind === 'group') {
-    queryResult.group = result.value
-  } else {
-    queryResult.message = result.value
-  }
-  setStatus('success', `已读取第 ${id} 条消息`)
-}
 </script>
 
 <template>
-  <div class="app" :style="themeStyle">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark">Q弹</div>
-        <div class="brand-text">
-          <h1>QQ 弹幕</h1>
-          <p>通知捕获台</p>
-        </div>
-      </div>
+  <main class="overlay" :style="themeStyle">
+    <div
+      v-if="!isFullscreen"
+      class="window-drag-handle"
+      title="拖动移动窗口"
+      aria-label="拖动移动窗口"
+    ></div>
 
-      <div v-if="currentUser" class="session">
-        <div class="session-user">
-          <strong>{{ currentUser.name }}</strong>
-          <span>ID {{ currentUser.id }}</span>
-        </div>
-        <button class="ghost-btn" type="button" @click="logout">退出</button>
-      </div>
-    </header>
-
-    <!-- 弹幕浮层不拦截鼠标，消息会在这里从右侧漂浮到左侧。 -->
-    <div class="bullet-layer" aria-hidden="true">
-      <span
+    <section class="danmaku-layer" aria-live="polite">
+      <article
         v-for="bullet in bullets"
         :key="bullet.id"
-        class="bullet"
-        :style="{ top: bullet.top + 'px' }"
+        class="danmaku"
+        :style="{
+          '--bullet-top': `${bullet.top}px`,
+          '--bullet-duration': `${bullet.duration}s`,
+        }"
+        @animationend="removeBullet(bullet.id)"
       >
-        <em class="bullet-group">{{ bullet.group }}</em>
-        <span class="bullet-content">{{ bullet.content || bullet.group }}</span>
-      </span>
-    </div>
+        <strong class="danmaku-title">{{ bullet.title }}</strong>
+        <span class="danmaku-separator" aria-hidden="true"></span>
+        <span class="danmaku-content">{{ bullet.content }}</span>
+      </article>
+    </section>
 
-    <main class="page">
-      <section v-if="!currentUser" class="auth-wrap">
-        <div class="auth-panel">
-          <div class="segmented" role="tablist" aria-label="账号操作">
+    <aside class="quick-settings">
+      <button
+        v-if="!settingsOpen"
+        class="settings-trigger"
+        type="button"
+        @click="settingsOpen = true"
+      >
+        {{ currentUser ? '调节' : '登录' }}
+      </button>
+
+      <section v-else class="settings-panel">
+        <header class="settings-head">
+          <div class="monitor-state">
+            <span class="monitor-dot" :class="{ offline: !currentUser }"></span>
+            <h1>
+              {{ currentUser ? '桌面弹幕' : (authMode === 'login' ? '用户登录' : '用户注册') }}
+            </h1>
+          </div>
+          <div class="settings-head-actions">
+            <button class="text-button" type="button" @click="toggleWindowMode">
+              {{ isFullscreen ? '移动窗口' : '铺满屏幕' }}
+            </button>
+            <button class="text-button" type="button" @click="settingsOpen = false">
+              收起
+            </button>
+          </div>
+        </header>
+
+        <template v-if="!currentUser">
+          <div class="auth-switch">
             <button
               type="button"
-              role="tab"
-              :aria-selected="mode === 'login'"
-              :class="{ active: mode === 'login' }"
-              @click="switchMode('login')"
+              :class="{ active: authMode === 'login' }"
+              @click="switchAuthMode('login')"
             >
               登录
             </button>
             <button
               type="button"
-              role="tab"
-              :aria-selected="mode === 'register'"
-              :class="{ active: mode === 'register' }"
-              @click="switchMode('register')"
+              :class="{ active: authMode === 'register' }"
+              @click="switchAuthMode('register')"
             >
               注册
             </button>
           </div>
 
-          <form class="form" @submit.prevent="submitAuth">
+          <form class="auth-form" @submit.prevent="submitAuth">
             <label class="field">
               <span>用户名</span>
               <input
-                v-model="credentials.username"
+                v-model.trim="authForm.username"
                 type="text"
                 autocomplete="username"
                 maxlength="32"
               />
             </label>
+
             <label class="field">
               <span>密码</span>
               <input
-                v-model="credentials.password"
+                v-model="authForm.password"
                 type="password"
-                :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
+                :autocomplete="authMode === 'login' ? 'current-password' : 'new-password'"
                 minlength="8"
                 maxlength="16"
               />
             </label>
-            <button class="primary-btn full" type="submit">
-              {{ mode === 'login' ? '登录' : '注册' }}
+
+            <p v-if="authMode === 'register'" class="auth-hint">
+              8~16 位，需包含大小写字母，以及数字或符号
+            </p>
+            <p v-if="authError" class="auth-error">{{ authError }}</p>
+
+            <button class="auth-submit" type="submit" :disabled="authBusy">
+              {{ authBusy ? '处理中…' : (authMode === 'login' ? '登录' : '注册') }}
             </button>
           </form>
-        </div>
-      </section>
+        </template>
 
-      <section v-else class="workspace">
-        <div class="side-column">
-          <section class="panel">
-            <div class="panel-head">
-              <h2>实时监听</h2>
-              <span class="live-dot waiting"></span>
+        <template v-else>
+          <div class="user-strip">
+            <div>
+              <strong>{{ currentUser.name }}</strong>
+              <span>ID {{ currentUser.id }}</span>
             </div>
-            <p class="capture-state">QQ 通知监听中</p>
-          </section>
+            <button type="button" :disabled="authBusy" @click="logoutUser">退出登录</button>
+          </div>
 
-          <section class="panel">
-            <div class="panel-head">
-              <h2>外观设置</h2>
-            </div>
-            <label class="color-field">
-              <span>弹幕文字颜色</span>
-              <input v-model="bulletColor" type="color" />
-            </label>
-            <label class="color-field">
-              <span>界面主题颜色</span>
-              <input v-model="accentColor" type="color" />
-            </label>
-          </section>
+          <div class="settings-list">
+          <label class="color-control">
+            <span>弹幕背景</span>
+            <span class="color-value">
+              <code>{{ appearance.background }}</code>
+              <input v-model="appearance.background" type="color" />
+            </span>
+          </label>
 
-          <section class="panel">
-            <div class="panel-head">
-              <h2>消息查询</h2>
-            </div>
-            <label class="field">
-              <span>消息编号</span>
-              <input v-model.number="queryId" type="number" min="0" step="1" />
-            </label>
-            <div class="btn-row">
-              <button class="secondary-btn" type="button" @click="fetchQuery('group')">
-                读取群名
-              </button>
-              <button class="secondary-btn" type="button" @click="fetchQuery('message')">
-                读取内容
-              </button>
-            </div>
-            <div class="query-result">
-              <div>
-                <span class="label-text">群名</span>
-                <p>{{ queryResult.group || '—' }}</p>
-              </div>
-              <div>
-                <span class="label-text">内容</span>
-                <p>{{ queryResult.message || '—' }}</p>
-              </div>
-            </div>
-          </section>
+          <label class="color-control">
+            <span>群名颜色</span>
+            <span class="color-value">
+              <code>{{ appearance.title }}</code>
+              <input v-model="appearance.title" type="color" />
+            </span>
+          </label>
+
+          <label class="color-control">
+            <span>内容颜色</span>
+            <span class="color-value">
+              <code>{{ appearance.content }}</code>
+              <input v-model="appearance.content" type="color" />
+            </span>
+          </label>
+
+          <label class="size-control">
+            <span>弹幕大小</span>
+            <output>{{ Math.round(appearance.scale * 100) }}%</output>
+            <input v-model.number="appearance.scale" type="range" min="0.75" max="2" step="0.05" />
+          </label>
         </div>
 
-        <section class="records-column">
-          <div class="panel-head records-head">
-            <h2>最近记录</h2>
-            <span class="count">{{ records.length }}</span>
+          <div class="preview" aria-hidden="true">
+            <strong>群名称</strong>
+            <span></span>
+            <p>QQ 消息内容预览</p>
           </div>
 
-          <div class="records-list">
-            <article v-for="(record, index) in records" :key="record.id" class="record">
-              <div class="record-index">{{ index + 1 }}</div>
-              <div class="record-main">
-                <strong>{{ record.group || 'QQ消息' }}</strong>
-                <span class="record-content">{{ record.content || record.group }}</span>
-                <span class="record-time">{{ record.time }}</span>
-              </div>
-            </article>
-            <div v-if="records.length === 0" class="empty">
-              <p>暂无记录</p>
-            </div>
-          </div>
-
-          <div class="activity-panel">
-            <div class="panel-head">
-              <h2>动态</h2>
-            </div>
-            <ol class="activity-list">
-              <li v-for="(item, index) in activity" :key="item.time + index">
-                <time>{{ item.time }}</time>
-                <span>{{ item.text }}</span>
-              </li>
-              <li v-if="activity.length === 0" class="empty-li">暂无动态</li>
-            </ol>
-          </div>
-        </section>
+          <footer class="settings-actions">
+            <button type="button" @click="resetAppearance">恢复默认</button>
+            <button type="button" @click="playPreview">试放弹幕</button>
+            <button type="button" @click="clearBullets">清空弹幕</button>
+            <button class="quit-button" type="button" @click="exitApp">退出</button>
+          </footer>
+        </template>
       </section>
+    </aside>
 
-      <div class="status-bar" :class="status.kind">
-        <span class="status-dot"></span>
-        <span>{{ status.text }}</span>
-      </div>
-    </main>
-  </div>
+    <div v-if="notice" class="notice" role="status">{{ notice }}</div>
+  </main>
 </template>
 
 <style scoped>
-.app {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.topbar {
-  height: 68px;
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0 20px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.brand-mark {
-  width: 44px;
-  height: 44px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--accent);
-  color: #08120f;
-  font-size: 14px;
-  font-weight: 800;
-  letter-spacing: 0;
-}
-
-.brand-text {
-  min-width: 0;
-}
-
-.brand h1 {
-  margin: 0;
-  font-size: 18px;
-  line-height: 1.2;
-}
-
-.brand p {
-  margin: 3px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-.session {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-
-.session-user {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  min-width: 0;
-}
-
-.session-user strong {
-  max-width: 220px;
+.overlay {
+  position: fixed;
+  inset: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 14px;
+  background: transparent;
+  color: #f8fafc;
 }
 
-.session-user span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.page {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 18px;
-}
-
-.auth-wrap {
-  flex: 1;
+.window-drag-handle {
+  --wails-draggable: drag;
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  z-index: 40;
+  width: 72px;
+  height: 28px;
   display: grid;
   place-items: center;
-  padding-bottom: 40px;
-}
-
-.auth-panel {
-  width: min(420px, 100%);
-  padding: 18px;
-  border: 1px solid var(--line);
+  border: 1px solid #334155;
   border-radius: 8px;
-  background: var(--panel);
+  background: rgba(8, 15, 28, 0.94);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  cursor: grab;
+  transform: translateX(-50%);
 }
 
-.segmented {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  padding: 4px;
-  margin-bottom: 18px;
+.window-drag-handle::before {
+  width: 30px;
+  height: 10px;
+  content: "";
+  background-image: radial-gradient(circle, #cbd5e1 1.3px, transparent 1.5px);
+  background-size: 7px 5px;
+}
+
+.window-drag-handle:active {
+  cursor: grabbing;
+}
+
+.danmaku-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.danmaku {
+  position: absolute;
+  top: var(--bullet-top);
+  left: 100vw;
+  display: inline-flex;
+  align-items: baseline;
+  gap: calc(12px * var(--bullet-scale));
+  max-width: min(90vw, 1440px);
+  padding: calc(9px * var(--bullet-scale)) calc(15px * var(--bullet-scale));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--bullet-background) 62%, white);
   border-radius: 8px;
-  background: var(--inner);
+  background: var(--bullet-background);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.3);
+  backface-visibility: hidden;
+  contain: layout paint;
+  white-space: nowrap;
+  transform: translate3d(0, 0, 0);
+  animation: danmaku-move var(--bullet-duration) linear both;
+  will-change: transform, opacity;
 }
 
-.segmented button {
-  height: 36px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
+.danmaku-title {
+  flex: 0 0 auto;
+  color: var(--bullet-title);
+  font-size: calc(19px * var(--bullet-scale));
+  line-height: 1.25;
+}
+
+.danmaku-separator {
+  width: 1px;
+  height: calc(22px * var(--bullet-scale));
+  flex: 0 0 auto;
+  align-self: center;
+  background: color-mix(in srgb, var(--bullet-title) 55%, transparent);
+}
+
+.danmaku-content {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--bullet-content);
+  font-size: calc(16px * var(--bullet-scale));
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+@keyframes danmaku-move {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0);
+  }
+  3% {
+    opacity: 1;
+  }
+  97% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.88;
+    transform: translate3d(calc(-100vw - 100% - 20px), 0, 0);
+  }
+}
+
+.quick-settings {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 10;
+}
+
+.settings-trigger,
+.settings-panel {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: rgba(8, 15, 28, 0.94);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(14px);
+}
+
+.settings-trigger {
+  height: 38px;
+  padding: 0 16px;
+  color: #e2e8f0;
   font-size: 14px;
-}
-
-.segmented button.active {
-  background: var(--accent-soft);
-  color: var(--accent);
   font-weight: 700;
 }
 
-.form {
+.settings-panel {
+  width: min(342px, calc(100vw - 36px));
+  padding: 16px;
+}
+
+.settings-head,
+.monitor-state,
+.color-control,
+.color-value,
+.size-control,
+.settings-actions {
+  display: flex;
+  align-items: center;
+}
+
+.settings-head {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.settings-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.monitor-state {
+  gap: 9px;
+}
+
+.monitor-state h1 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.monitor-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.14);
+}
+
+.monitor-dot.offline {
+  background: #64748b;
+  box-shadow: 0 0 0 4px rgba(100, 116, 139, 0.16);
+}
+
+.text-button {
+  height: 30px;
+  padding: 0 9px;
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.auth-switch {
   display: grid;
-  gap: 14px;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 15px;
+  padding: 4px;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #0b1424;
+}
+
+.auth-switch button {
+  height: 34px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.auth-switch button.active {
+  background: #173042;
+  color: #67e8f9;
+  font-weight: 700;
+}
+
+.auth-form {
+  display: grid;
+  gap: 13px;
 }
 
 .field {
   display: grid;
   gap: 7px;
-  min-width: 0;
 }
 
-.field span,
-.label-text {
-  color: var(--muted);
+.field > span {
+  color: #94a3b8;
   font-size: 12px;
 }
 
 .field input {
   width: 100%;
   height: 40px;
-  min-width: 0;
   padding: 0 12px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid #334155;
   border-radius: 6px;
-  background: var(--input);
-  color: var(--text);
+  background: #0b1424;
+  color: #f8fafc;
   outline: none;
 }
 
 .field input:focus {
-  border-color: var(--accent);
+  border-color: #38bdf8;
 }
 
-.workspace {
-  flex: 1;
-  display: grid;
-  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
-  gap: 16px;
-  min-height: 0;
+.auth-hint,
+.auth-error {
+  margin: -2px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.side-column {
-  display: grid;
-  align-content: start;
-  gap: 16px;
-  min-width: 0;
+.auth-hint {
+  color: #94a3b8;
 }
 
-.panel {
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  min-width: 0;
+.auth-error {
+  color: #fca5a5;
 }
 
-.panel-head {
+.auth-submit {
+  height: 40px;
+  border: 0;
+  border-radius: 6px;
+  background: #22d3ee;
+  color: #07131d;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.auth-submit:disabled,
+.user-strip button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.user-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
+  padding: 10px 11px;
+  border: 1px solid #1e293b;
+  border-radius: 7px;
+  background: #0b1424;
 }
 
-.panel-head h2 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.primary-btn,
-.secondary-btn,
-.ghost-btn {
-  height: 38px;
-  padding: 0 14px;
-  border-radius: 6px;
-  font-size: 14px;
-}
-
-.primary-btn {
-  border: 0;
-  background: var(--accent);
-  color: #08120f;
-  font-weight: 700;
-}
-
-.primary-btn:disabled {
-  cursor: wait;
-  opacity: 0.62;
-}
-
-.secondary-btn {
-  border: 1px solid var(--line-strong);
-  background: var(--inner);
-  color: var(--text);
-}
-
-.ghost-btn {
-  border: 1px solid var(--line-strong);
-  background: transparent;
-  color: var(--muted);
-}
-
-.primary-btn:hover,
-.secondary-btn:hover,
-.ghost-btn:hover {
-  filter: brightness(1.12);
-}
-
-.full {
-  width: 100%;
-}
-
-.btn-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.live-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--danger);
-}
-
-.live-dot.waiting {
-  background: var(--accent);
-  animation: pulse 1.1s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-.query-result {
-  display: grid;
-  gap: 10px;
-}
-
-.query-result div {
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--inner);
-}
-
-.query-result p {
-  margin: 6px 0 0;
-  overflow-wrap: anywhere;
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-.records-column {
+.user-strip > div {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  min-width: 0;
-  min-height: 0;
-}
-
-.records-head {
-  margin-bottom: 0;
-}
-
-.count {
-  min-width: 30px;
-  height: 24px;
-  display: inline-grid;
-  place-items: center;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: var(--inner);
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.records-list {
-  display: grid;
-  align-content: start;
-  gap: 10px;
-  max-height: 42vh;
-  overflow: auto;
-  padding: 2px;
-}
-
-.record {
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--accent);
-  border-radius: 6px;
-  background: var(--inner);
-}
-
-.record-index {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 6px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.record-main {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
-.record-main strong {
+.user-strip strong {
   overflow: hidden;
+  color: #f8fafc;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
 }
 
-.record-main span {
-  color: var(--muted);
+.user-strip span {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.user-strip button {
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  background: transparent;
+  color: #cbd5e1;
   font-size: 12px;
 }
 
-.empty {
-  padding: 26px 0;
-  border: 1px dashed var(--line-strong);
-  border-radius: 6px;
-  text-align: center;
-}
-
-.empty p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.activity-panel {
-  flex: 1;
-  min-height: 120px;
-  overflow: auto;
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-}
-
-.activity-list {
+.settings-list {
   display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+  gap: 6px;
 }
 
-.activity-list li {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 0;
-  color: var(--muted);
+.color-control,
+.size-control {
+  min-height: 48px;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #1e293b;
+  color: #cbd5e1;
   font-size: 13px;
 }
 
-.activity-list time {
-  flex: 0 0 auto;
-  color: var(--accent);
+.color-value {
+  gap: 10px;
+}
+
+.color-value code {
+  color: #94a3b8;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+input[type='color'] {
+  width: 42px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  background: #0f172a;
+  cursor: pointer;
+}
+
+.size-control {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  padding-top: 10px;
+}
+
+.size-control output {
+  color: #67e8f9;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
-.activity-list span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.size-control input {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 7px 0 9px;
+  accent-color: #22d3ee;
 }
 
-.empty-li {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.capture-state {
-  margin: 0 0 12px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.color-field {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: 10px;
-  min-height: 40px;
-}
-
-.color-field span {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.color-field input[type="color"] {
-  width: 52px;
-  height: 32px;
-  padding: 2px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--input);
-  cursor: pointer;
-}
-
-.bullet-layer {
-  position: fixed;
-  inset: 68px 0 0 0;
-  z-index: 80;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-.bullet {
-  position: absolute;
-  left: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  max-width: 86vw;
-  padding: 8px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 999px;
-  background: rgba(8, 12, 16, 0.42);
-  color: var(--bullet-color);
-  white-space: nowrap;
-  animation: bullet-fly 9s linear forwards;
-  will-change: transform;
-}
-
-.bullet-group {
-  flex: 0 0 auto;
-  color: var(--bullet-color);
-  font-style: normal;
-  font-weight: 800;
-  font-size: 22px;
-  line-height: 1.2;
-}
-
-.bullet-content {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 15px;
-  line-height: 1.3;
-}
-
-@keyframes bullet-fly {
-  to {
-    transform: translateX(calc(-100vw - 100%));
-  }
-}
-
-.record-main .record-content {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.record-main .record-time {
-  font-size: 11px;
-}
-
-.status-bar {
-  flex: 0 0 auto;
+.preview {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 9px;
-  min-height: 42px;
-  margin-top: 14px;
-  padding: 0 14px;
-  border: 1px solid var(--line);
+  margin-top: 15px;
+  padding: calc(8px * var(--bullet-scale)) calc(12px * var(--bullet-scale));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--bullet-background) 62%, white);
   border-radius: 8px;
-  background: var(--panel);
-  color: var(--text);
-  font-size: 13px;
+  background: var(--bullet-background);
+  white-space: nowrap;
 }
 
-.status-dot {
-  width: 8px;
-  height: 8px;
+.preview strong {
   flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--muted);
+  color: var(--bullet-title);
+  font-size: calc(16px * var(--bullet-scale));
 }
 
-.status-bar.success .status-dot {
-  background: var(--accent);
+.preview span {
+  width: 1px;
+  height: calc(19px * var(--bullet-scale));
+  flex: 0 0 auto;
+  background: color-mix(in srgb, var(--bullet-title) 55%, transparent);
 }
 
-.status-bar.error .status-dot {
-  background: var(--danger);
+.preview p {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--bullet-content);
+  font-size: calc(14px * var(--bullet-scale));
+  text-overflow: ellipsis;
 }
 
-.status-bar.info .status-dot {
-  background: var(--warn);
-  animation: pulse 1.1s ease-in-out infinite;
+.settings-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
 }
 
-@media (max-width: 760px) {
-  .workspace {
-    grid-template-columns: 1fr;
+.settings-actions button {
+  height: 34px;
+  flex: 1;
+  padding: 0 10px;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #111c2e;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.settings-actions .quit-button {
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+
+.settings-trigger:hover,
+.settings-actions button:hover {
+  filter: brightness(1.16);
+}
+
+.notice {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 20;
+  max-width: min(480px, calc(100vw - 36px));
+  padding: 11px 14px;
+  border: 1px solid #7f1d1d;
+  border-radius: 8px;
+  background: rgba(69, 10, 10, 0.96);
+  color: #fecaca;
+  font-size: 13px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.36);
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+@media (max-width: 560px) {
+  .quick-settings {
+    top: 10px;
+    right: 10px;
   }
 
-  .records-list {
-    max-height: 30vh;
+  .settings-panel {
+    width: calc(100vw - 20px);
   }
 }
 </style>

@@ -9,6 +9,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	wailsWindows "github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
 //go:embed all:frontend/dist
@@ -21,15 +22,25 @@ func NewApp() *App {
 func main() {
 	app := NewApp()
 	err := wails.Run(&options.App{
-		Title:     "QQ弹幕",
-		Width:     1024,
-		Height:    768,
-		MinHeight: 800,
-		MinWidth:  600,
+		Title:            "QQ桌面弹幕",
+		Width:            1280,
+		Height:           720,
+		DisableResize:    true,
+		Fullscreen:       true,
+		Frameless:        true,
+		AlwaysOnTop:      true,
+		WindowStartState: options.Fullscreen,
+		CSSDragProperty:  "--wails-draggable",
+		CSSDragValue:     "drag",
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		BackgroundColour: &options.RGBA{R: 123, G: 104, B: 238, A: 1},
+		BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 0},
+		Windows: &wailsWindows.Options{
+			WebviewIsTransparent:              true,
+			WindowIsTranslucent:               true,
+			DisableFramelessWindowDecorations: true,
+		},
 		OnStartup: func(ctx context.Context) {
 			app.startup(ctx)
 		},
@@ -44,7 +55,6 @@ func main() {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	a.startQQMonitor(ctx)
 	exePath, err := os.Executable()
 	if err != nil {
 		println("获取程序路径失败:", err.Error())
@@ -53,5 +63,4 @@ func (a *App) startup(ctx context.Context) {
 	if err1 := store.CreateDesktopShortcut(exePath); err1 != nil {
 		println("创建桌面快捷方式失败：:", err.Error())
 	}
-
 }

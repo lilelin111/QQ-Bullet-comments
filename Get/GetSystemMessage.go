@@ -76,24 +76,25 @@ foreach ($n in $all) {
 func queryQQNotifications() ([]string, error) {
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", queryScript)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	var s bytes.Buffer //缓冲
+	cmd.Stderr = &s
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("查询通知失败: %w, stderr=%s", err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("查询通知失败: %w, s=%s", err, strings.TrimSpace(s.String()))
 	}
 
 	var lines []string
-	sc := bufio.NewScanner(strings.NewReader(string(out)))
-	for sc.Scan() {
+	sc := bufio.NewScanner(strings.NewReader(string(out))) //读取
+	for sc.Scan() {                                        //sc.Scan的返回值是bool类型
 		lines = append(lines, sc.Text())
 	}
-	return lines, sc.Err()
+	return lines, sc.Err() //返回是不是正常输出
 }
 
 var (
-	seenMu sync.Mutex              // seenMu：保护 seen 的并发读写
-	seen   = make(map[string]bool) // seen：记录“已经处理过”的通知 ID
+	seenMu     sync.Mutex              // seenMu：保护 seen 的并发读写
+	seen       = make(map[string]bool) // seen：记录“已经处理过”的通知 ID
+	maxSeenCap = 10000
 )
 
 type QQMessage struct {
@@ -103,16 +104,17 @@ type QQMessage struct {
 	Body           string `json:"body"`            //通知内容
 }
 
+// 分隔信息
 func parseLine(line string) (QQMessage, bool) {
-	parts := strings.SplitN(line, "\t", 4)
+	parts := strings.SplitN(line, "\t", 4) //分隔4段
 	if len(parts) != 4 {
 		return QQMessage{}, false
 	}
 	return QQMessage{
-		NotificationID: parts[0],
-		Time:           parts[1],
-		Title:          parts[2],
-		Body:           parts[3],
+		NotificationID: parts[0], //ID
+		Time:           parts[1], //时间
+		Title:          parts[2], //标题
+		Body:           parts[3], //内容
 	}, true
 }
 
@@ -121,24 +123,26 @@ func PrimeSeen() {
 	if err != nil {
 		return
 	}
-	seenMu.Lock()
+	seenMu.Lock() //互斥锁
 	defer seenMu.Unlock()
 	for _, line := range lines {
-		if m, ok := parseLine(line); ok {
+		m, ok := parseLine(line)
+		if ok {
 			seen[m.NotificationID] = true
-		}
+		} //去重
 	}
 }
 
-func NextMessage(ctx context.Context, interval time.Duration) (QQMessage, error) { // NextMessage：持续查询，只返回真正的新通知
+func NextMessages(ctx context.Context, interval time.Duration) ([]QQMessage, error) { // NextMessages：持续查询，返回本轮全部新通知
 	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	defer ticker.Stop() //停止
 	for {
 		lines, err := queryQQNotifications()
 		if err != nil {
-			return QQMessage{}, fmt.Errorf("查询通知失败: %w", err) // 返回错误，不再把错误当弹幕内容
+			return nil, fmt.Errorf("查询通知失败: %w", err) // 返回错误，不再把错误当弹幕内容
 		}
-		seenMu.Lock()
+		seenMu.Lock() //互斥锁
+		var newMessages []QQMessage
 		for _, line := range lines {
 			m, ok := parseLine(line)
 			if !ok {
@@ -146,15 +150,34 @@ func NextMessage(ctx context.Context, interval time.Duration) (QQMessage, error)
 			}
 			if !seen[m.NotificationID] {
 				seen[m.NotificationID] = true
-				seenMu.Unlock()
-				return m, nil
+				newMessages = append(newMessages, m)
+			}
+		}
+		if len(seen) > maxSeenCap { // 如果 seen map 超过容量上限
+			clear(seen)                     // 清空整个 map，释放内存
+			for _, m := range newMessages { // 重新标记本轮新消息
+				seen[m.NotificationID] = true // 防止刚发现的消息被误清后重复推送
 			}
 		}
 		seenMu.Unlock()
+		if len(newMessages) > 0 {
+			return newMessages, nil
+		}
 		select {
-		case <-ctx.Done():
-			return QQMessage{}, ctx.Err()
-		case <-ticker.C:
+		case <-ctx.Done(): //上下文被取消
+			return nil, ctx.Err()
+		case <-ticker.C: //定时触发
 		}
 	}
+}
+
+func NextMessage(ctx context.Context, interval time.Duration) (QQMessage, error) {
+	messages, err := NextMessages(ctx, interval)
+	if err != nil {
+		return QQMessage{}, err
+	}
+	if len(messages) == 0 {
+		return QQMessage{}, fmt.Errorf("没有新的 QQ 通知")
+	}
+	return messages[0], nil
 }

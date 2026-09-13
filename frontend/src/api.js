@@ -55,6 +55,11 @@ export async function login(username, password) {
   return normalize(result)
 }
 
+export async function logout() {
+  const result = await appApi().Logout()
+  return normalize(result)
+}
+
 export async function createMessage(user) {
   const result = await appApi().CreateMessage(userPayload(user))
   return normalize(result)

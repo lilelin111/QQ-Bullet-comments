@@ -6,6 +6,8 @@ export function CreateMessage(arg1:store.User):Promise<Record<string, any>>;
 
 export function Login(arg1:string,arg2:string):Promise<Record<string, any>>;
 
+export function Logout():Promise<Record<string, any>>;
+
 export function Register(arg1:string,arg2:string):Promise<Record<string, any>>;
 
 export function ShowGetMessage(arg1:number,arg2:number):Promise<Record<string, any>>;
