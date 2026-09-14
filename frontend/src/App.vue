@@ -17,7 +17,16 @@ const defaults = {
   title: '#22d3ee',
   content: '#f8fafc',
   scale: 1,
+  areaPosition: 'top',
+  areaHeight: 100,
+  areaWidth: 100,
 }
+
+const areaOptions = [
+  { value: 'top', label: '上' },
+  { value: 'center', label: '中' },
+  { value: 'bottom', label: '下' },
+]
 
 function loadAppearance() {
   try {
@@ -27,6 +36,9 @@ function loadAppearance() {
       title: validColor(saved.title, defaults.title),
       content: validColor(saved.content, defaults.content),
       scale: boundedScale(saved.scale),
+      areaPosition: validAreaPosition(saved.areaPosition, defaults.areaPosition),
+      areaHeight: boundedArea(saved.areaHeight, 20, 100, defaults.areaHeight),
+      areaWidth: boundedArea(saved.areaWidth, 20, 100, defaults.areaWidth),
     }
   } catch {
     return { ...defaults }
@@ -42,12 +54,24 @@ function boundedScale(value) {
   return Number.isFinite(number) ? Math.min(2, Math.max(0.75, number)) : defaults.scale
 }
 
+function boundedArea(value, minimum, maximum, fallback) {
+  const number = Number(value)
+  return Number.isFinite(number)
+    ? Math.min(maximum, Math.max(minimum, number))
+    : fallback
+}
+
+function validAreaPosition(value, fallback) {
+  return areaOptions.some((option) => option.value === value) ? value : fallback
+}
+
 const appearance = reactive(loadAppearance())
 const settingsOpen = ref(true)
 const isFullscreen = ref(true)
 const currentUser = ref(null)
 const authMode = ref('login')
 const authBusy = ref(false)
+const windowModeBusy = ref(false)
 const authError = ref('')
 const authForm = reactive({
   username: '',
@@ -56,19 +80,40 @@ const authForm = reactive({
 const bullets = ref([])
 const notice = ref('')
 const laneStep = ref(88)
+const viewportWidth = ref(window.innerWidth)
 const pendingMessages = []
 const laneReadyAt = []
 
 let nextBulletId = 1
+let nextLaneIndex = 0
 let queueTimer = null
 let noticeTimer = null
 
-const themeStyle = computed(() => ({
-  '--bullet-background': appearance.background,
-  '--bullet-title': appearance.title,
-  '--bullet-content': appearance.content,
-  '--bullet-scale': String(appearance.scale),
-}))
+const themeStyle = computed(() => {
+  const areaHeight = boundedArea(appearance.areaHeight, 20, 100, defaults.areaHeight)
+  const areaWidth = boundedArea(appearance.areaWidth, 20, 100, defaults.areaWidth)
+  let areaTop = 0
+
+  if (appearance.areaPosition === 'center') {
+    areaTop = (100 - areaHeight) / 2
+  } else if (appearance.areaPosition === 'bottom') {
+    areaTop = 100 - areaHeight
+  }
+
+  const areaWidthPx = Math.max(1, viewportWidth.value * areaWidth / 100)
+
+  return {
+    '--bullet-background': appearance.background,
+    '--bullet-title': appearance.title,
+    '--bullet-content': appearance.content,
+    '--bullet-scale': String(appearance.scale),
+    '--playback-top': `${areaTop}%`,
+    '--playback-left': `${(100 - areaWidth) / 2}%`,
+    '--playback-width': `${areaWidth}%`,
+    '--playback-height': `${areaHeight}%`,
+    '--playback-travel': `${-(areaWidthPx + 20)}px`,
+  }
+})
 
 watch(
   appearance,
@@ -135,11 +180,21 @@ function handleMonitorError(payload) {
 }
 
 function updateLanes() {
-  const availableHeight = Math.max(240, window.innerHeight - 20)
-  const nextStep = Math.round(88 * appearance.scale)
-  const nextCount = Math.max(3, Math.floor(availableHeight / nextStep))
+  viewportWidth.value = Math.max(1, window.innerWidth)
+  const viewportHeight = Math.max(1, window.innerHeight)
+  const areaHeight = viewportHeight * boundedArea(
+    appearance.areaHeight,
+    20,
+    100,
+    defaults.areaHeight,
+  ) / 100
+  const safeArea = 8
+  const availableHeight = Math.max(1, areaHeight - safeArea * 2)
+  const preferredStep = Math.max(48, 88 * appearance.scale)
+  const nextCount = Math.max(1, Math.floor(availableHeight / preferredStep))
 
-  laneStep.value = nextStep
+  // 按实际屏幕高度均分轨道，让弹幕覆盖整块屏幕而不只集中在上半部分。
+  laneStep.value = availableHeight / nextCount
 
   while (laneReadyAt.length < nextCount) {
     laneReadyAt.push(0)
@@ -147,8 +202,20 @@ function updateLanes() {
   if (laneReadyAt.length > nextCount) {
     laneReadyAt.length = nextCount
   }
+  nextLaneIndex %= laneReadyAt.length
 
   pumpQueue()
+}
+
+function findAvailableLane(now) {
+  for (let offset = 0; offset < laneReadyAt.length; offset += 1) {
+    const lane = (nextLaneIndex + offset) % laneReadyAt.length
+    if (laneReadyAt[lane] <= now) {
+      nextLaneIndex = (lane + 1) % laneReadyAt.length
+      return lane
+    }
+  }
+  return -1
 }
 
 function pumpQueue() {
@@ -156,7 +223,7 @@ function pumpQueue() {
   queueTimer = null
 
   const now = performance.now()
-  let lane = laneReadyAt.findIndex((readyAt) => readyAt <= now)
+  let lane = findAvailableLane(now)
 
   while (pendingMessages.length > 0 && lane >= 0) {
     const message = pendingMessages.shift()
@@ -167,13 +234,13 @@ function pumpQueue() {
       id,
       title: message.title || 'QQ消息',
       content: message.content || message.title || '新消息',
-      top: 10 + lane * laneStep.value,
+      top: 8 + lane * laneStep.value,
       duration,
     })
 
     // 留出短暂间隔，避免同一轨道连续弹幕紧贴在一起。
     laneReadyAt[lane] = now + duration * 1000 + 320
-    lane = laneReadyAt.findIndex((readyAt) => readyAt <= now)
+    lane = findAvailableLane(now)
   }
 
   if (pendingMessages.length > 0 && laneReadyAt.length > 0) {
@@ -184,8 +251,12 @@ function pumpQueue() {
 
 function bulletDuration(message) {
   const textLength = `${message.title}${message.content}`.length
-  const estimatedWidth = Math.min(1440, 120 + textLength * 18)
-  const travelDistance = window.innerWidth + estimatedWidth
+  const areaWidth = Math.max(
+    1,
+    viewportWidth.value * boundedArea(appearance.areaWidth, 20, 100, defaults.areaWidth) / 100,
+  )
+  const estimatedWidth = Math.min(areaWidth * 0.9, 1440, 120 + textLength * 18)
+  const travelDistance = areaWidth + estimatedWidth
   const speed = 210 + Math.min(70, textLength * 0.8)
   return Math.min(16, Math.max(6.5, travelDistance / speed))
 }
@@ -198,6 +269,7 @@ function clearBullets() {
   pendingMessages.length = 0
   bullets.value = []
   laneReadyAt.fill(0)
+  nextLaneIndex = 0
 }
 
 function resetAppearance() {
@@ -266,19 +338,47 @@ async function logoutUser() {
   }
 }
 
+async function waitForWindowState(expectedFullscreen, timeoutMs = 1800) {
+  const deadline = performance.now() + timeoutMs
+
+  while (performance.now() < deadline) {
+    if (await WindowIsFullscreen() === expectedFullscreen) {
+      return true
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+  }
+
+  return false
+}
+
 async function toggleWindowMode() {
+  if (windowModeBusy.value) {
+    return
+  }
+
+  windowModeBusy.value = true
+  const targetFullscreen = !isFullscreen.value
+
   try {
-    if (isFullscreen.value) {
-      WindowUnfullscreen()
-    } else {
+    if (targetFullscreen) {
       WindowFullscreen()
+    } else {
+      // Wails 的全屏切换是异步的。先显示拖动柄，再等待后端完成状态切换，
+      // 避免状态查询竞态导致“已经是全屏却显示为可拖动”。
+      isFullscreen.value = false
+      WindowUnfullscreen()
     }
 
-    await new Promise((resolve) => window.setTimeout(resolve, 180))
-    isFullscreen.value = await WindowIsFullscreen()
+    const changed = await waitForWindowState(targetFullscreen)
+    isFullscreen.value = changed ? targetFullscreen : !targetFullscreen
+    if (!changed) {
+      pushNotice('窗口状态切换失败，请重试')
+    }
     updateLanes()
   } catch {
     pushNotice('无法切换窗口模式')
+  } finally {
+    windowModeBusy.value = false
   }
 }
 
@@ -291,11 +391,10 @@ function exitApp() {
 }
 
 onMounted(async () => {
-  try {
-    isFullscreen.value = await WindowIsFullscreen()
-  } catch {
-    isFullscreen.value = true
-  }
+  // 应用启动时后端仍在执行 Fullscreen 初始化，必须等待最终状态，
+  // 否则会误判为普通窗口并显示无效的拖动入口。
+  isFullscreen.value = true
+  await waitForWindowState(true)
   updateLanes()
   window.addEventListener('resize', updateLanes)
   EventsOn('qq:new-message', handleQQMessage)
@@ -356,7 +455,12 @@ onBeforeUnmount(() => {
             </h1>
           </div>
           <div class="settings-head-actions">
-            <button class="text-button" type="button" @click="toggleWindowMode">
+            <button
+              class="text-button"
+              type="button"
+              :disabled="windowModeBusy"
+              @click="toggleWindowMode"
+            >
               {{ isFullscreen ? '移动窗口' : '铺满屏幕' }}
             </button>
             <button class="text-button" type="button" @click="settingsOpen = false">
@@ -426,6 +530,33 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="settings-list">
+          <section class="area-control">
+            <span class="area-control-title">播放区域</span>
+            <div class="area-options" role="group" aria-label="播放区域位置">
+              <button
+                v-for="option in areaOptions"
+                :key="option.value"
+                type="button"
+                :class="{ active: appearance.areaPosition === option.value }"
+                @click="appearance.areaPosition = option.value"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+
+            <label class="area-range">
+              <span>区域高度</span>
+              <output>{{ Math.round(appearance.areaHeight) }}%</output>
+              <input v-model.number="appearance.areaHeight" type="range" min="20" max="100" step="5" />
+            </label>
+
+            <label class="area-range">
+              <span>区域长度</span>
+              <output>{{ Math.round(appearance.areaWidth) }}%</output>
+              <input v-model.number="appearance.areaWidth" type="range" min="20" max="100" step="5" />
+            </label>
+          </section>
+
           <label class="color-control">
             <span>弹幕背景</span>
             <span class="color-value">
@@ -518,7 +649,10 @@ onBeforeUnmount(() => {
 
 .danmaku-layer {
   position: absolute;
-  inset: 0;
+  top: var(--playback-top);
+  left: var(--playback-left);
+  width: var(--playback-width);
+  height: var(--playback-height);
   overflow: hidden;
   pointer-events: none;
 }
@@ -526,11 +660,11 @@ onBeforeUnmount(() => {
 .danmaku {
   position: absolute;
   top: var(--bullet-top);
-  left: 100vw;
+  left: 100%;
   display: inline-flex;
   align-items: baseline;
   gap: calc(12px * var(--bullet-scale));
-  max-width: min(90vw, 1440px);
+  max-width: min(90%, 1440px);
   padding: calc(9px * var(--bullet-scale)) calc(15px * var(--bullet-scale));
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--bullet-background) 62%, white);
@@ -582,7 +716,7 @@ onBeforeUnmount(() => {
   }
   100% {
     opacity: 0.88;
-    transform: translate3d(calc(-100vw - 100% - 20px), 0, 0);
+    transform: translate3d(calc(var(--playback-travel) - 100%), 0, 0);
   }
 }
 
@@ -612,6 +746,8 @@ onBeforeUnmount(() => {
 
 .settings-panel {
   width: min(342px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
   padding: 16px;
 }
 
@@ -668,6 +804,11 @@ onBeforeUnmount(() => {
   background: transparent;
   color: #94a3b8;
   font-size: 13px;
+}
+
+.text-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .auth-switch {
@@ -803,6 +944,65 @@ onBeforeUnmount(() => {
 .settings-list {
   display: grid;
   gap: 6px;
+}
+
+.area-control {
+  display: grid;
+  gap: 10px;
+  padding: 11px 0 14px;
+  border-bottom: 1px solid #1e293b;
+}
+
+.area-control-title {
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.area-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #0b1424;
+}
+
+.area-options button {
+  height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.area-options button.active {
+  background: #173042;
+  color: #67e8f9;
+  font-weight: 700;
+}
+
+.area-range {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 2px 12px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.area-range output {
+  color: #67e8f9;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.area-range input {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 5px 0 0;
+  accent-color: #22d3ee;
 }
 
 .color-control,
