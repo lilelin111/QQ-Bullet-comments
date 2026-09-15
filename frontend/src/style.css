@@ -1,6 +1,7 @@
 :root {
   color-scheme: dark;
-  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+  font-family:
+    Inter, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -19,17 +20,15 @@ body,
   background: transparent;
 }
 
-body {
-  color: #f8fafc;
-  -webkit-font-smoothing: antialiased;
-}
-
 button,
 input {
   font: inherit;
-  letter-spacing: 0;
 }
 
 button {
   cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
 }

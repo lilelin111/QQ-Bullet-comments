@@ -23,8 +23,8 @@ func main() {
 	app := NewApp()
 	err := wails.Run(&options.App{
 		Title:            "QQ桌面弹幕",
-		Width:            1280,
-		Height:           720,
+		Width:            120,
+		Height:           70,
 		DisableResize:    true,
 		Fullscreen:       true,
 		Frameless:        true,
