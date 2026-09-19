@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -83,7 +84,7 @@ func waitForOverlayWindows(ctx context.Context) uintptr {
 	//函数结束释放计时器
 	for {
 		hwnd, _, _ := procFindWindow.Call( //找窗口标识符
-			0, //不限制窗口类型
+			0,                              //不限制窗口类型
 			uintptr(unsafe.Pointer(title))) //传入指针
 		if hwnd != 0 {
 			return hwnd //找到了
@@ -139,9 +140,22 @@ func setOverlayClickThrough(hwnd uintptr, enabled bool) error {
 	}
 	return nil
 }
-func winCallError(err error) bool {
-	if err == nil {
+func winCallOk(err error) bool {
+	//判断错误是否为空
+	if err == nil { //空错误调用成功
 		return true
 	}
-	
+	//转换错误码
+	errno, ok := err.(syscall.Errno)
+	if ok && errno == 0 {
+		return true
+	}
+	return false
+}
+func winCallError(err error) error {
+	//是否调用成功
+	if winCallOk(err) {
+		return nil
+	}
+	return err
 }
