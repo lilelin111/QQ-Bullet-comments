@@ -11,4 +11,19 @@ func startOverlayIntegration(ctx context.Context) {
 	// 非 Windows 平台不启用系统级鼠标穿透。
 }
 
+func (a *App) SetOverlayInteractiveArea(
+	x int,
+	y int,
+	width int,
+	height int,
+	visible bool,
+) {
+	// 非 Windows 平台不需要处理原生鼠标命中区域。
+}
+
+func (a *App) SetOverlayBackgroundMode(enabled bool) error {
+	// 非 Windows 平台不需要处理任务栏隐藏。
+	return nil
+}
+
 // 非 Windows 平台空实现函数结束。

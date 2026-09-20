@@ -116,6 +116,8 @@ function unwrapPayload(payload) {
 
 const preferences = reactive(loadPreferences())
 const panelOpen = ref(true)
+const backgroundMode = ref(false)
+const interactionReady = ref(false)
 const authMode = ref('login')
 const authBusy = ref(false)
 const authError = ref('')
@@ -132,6 +134,8 @@ const viewport = reactive({
 let nextBulletId = 1
 let noticeTimer = null
 let queueTimer = null
+let overlayAreaFrame = 0
+let overlayAreaObserver = null
 const pendingMessages = []
 const laneAvailableAt = []
 
@@ -401,10 +405,89 @@ function exitApp() {
   }
 }
 
+function handleWindowFocus() {
+  interactionReady.value = true
+  if (!backgroundMode.value) {
+    panelOpen.value = true
+  }
+  scheduleOverlayInteractiveArea()
+}
+
+function handleWindowBlur() {
+  interactionReady.value = false
+}
+
+function handleViewportChange() {
+  syncLanes()
+  scheduleOverlayInteractiveArea()
+}
+
+function scheduleOverlayInteractiveArea() {
+  window.cancelAnimationFrame(overlayAreaFrame)
+  overlayAreaFrame = window.requestAnimationFrame(syncOverlayInteractiveArea)
+}
+
+async function syncOverlayInteractiveArea() {
+  const app = (window.go || window.__wails__?.go)?.main?.App
+  if (!app?.SetOverlayInteractiveArea) {
+    return
+  }
+
+  const target = document.querySelector(
+    panelOpen.value ? '.settings-panel' : '.panel-trigger',
+  )
+  if (!target) {
+    await app.SetOverlayInteractiveArea(0, 0, 0, 0, false)
+    return
+  }
+
+  const rect = target.getBoundingClientRect()
+  const scale = window.devicePixelRatio || 1
+  await app.SetOverlayInteractiveArea(
+    Math.round(rect.left * scale),
+    Math.round(rect.top * scale),
+    Math.round(rect.width * scale),
+    Math.round(rect.height * scale),
+    true,
+  )
+}
+
+async function syncOverlayWindowMode() {
+  const app = (window.go || window.__wails__?.go)?.main?.App
+  if (!app?.SetOverlayBackgroundMode) {
+    return
+  }
+
+  await app.SetOverlayBackgroundMode(backgroundMode.value)
+}
+
+watch(panelOpen, () => {
+  scheduleOverlayInteractiveArea()
+  syncOverlayWindowMode()
+})
+
+function hideToBackground() {
+  backgroundMode.value = true
+  panelOpen.value = false
+}
+
+function openSettings() {
+  backgroundMode.value = false
+  panelOpen.value = true
+  scheduleOverlayInteractiveArea()
+}
+
 onMounted(() => {
   WindowFullscreen()
+  interactionReady.value = document.hasFocus()
   syncLanes()
-  window.addEventListener('resize', syncLanes)
+  window.addEventListener('resize', handleViewportChange)
+  window.addEventListener('focus', handleWindowFocus)
+  window.addEventListener('blur', handleWindowBlur)
+  overlayAreaObserver = new ResizeObserver(scheduleOverlayInteractiveArea)
+  overlayAreaObserver.observe(document.querySelector('.control-dock'))
+  scheduleOverlayInteractiveArea()
+  syncOverlayWindowMode()
   EventsOn('qq:new-message', handleQQMessage)
   EventsOn('qq:monitor-error', handleMonitorError)
 })
@@ -412,7 +495,19 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.clearTimeout(queueTimer)
   window.clearTimeout(noticeTimer)
-  window.removeEventListener('resize', syncLanes)
+  window.cancelAnimationFrame(overlayAreaFrame)
+  overlayAreaObserver?.disconnect()
+  window.removeEventListener('resize', handleViewportChange)
+  window.removeEventListener('focus', handleWindowFocus)
+  window.removeEventListener('blur', handleWindowBlur)
+  ;(window.go || window.__wails__?.go)?.main?.App?.SetOverlayBackgroundMode?.(false)
+  ;(window.go || window.__wails__?.go)?.main?.App?.SetOverlayInteractiveArea?.(
+    0,
+    0,
+    0,
+    0,
+    false,
+  )
   EventsOff('qq:new-message')
   EventsOff('qq:monitor-error')
 })
@@ -440,14 +535,14 @@ onBeforeUnmount(() => {
       </article>
     </section>
 
-    <aside class="control-dock">
+    <aside class="control-dock" :class="{ interactive: interactionReady }">
       <button
         v-if="!panelOpen"
         class="panel-trigger"
         type="button"
         title="打开设置"
         aria-label="打开设置"
-        @click="panelOpen = true"
+        @click="openSettings"
       >
         <Settings2 :size="19" />
         <span class="status-dot" :class="{ offline: !currentUser }"></span>
@@ -470,9 +565,9 @@ onBeforeUnmount(() => {
           <button
             class="icon-button"
             type="button"
-            title="收起设置"
-            aria-label="收起设置"
-            @click="panelOpen = false"
+            title="隐藏到后台运行"
+            aria-label="隐藏到后台运行"
+            @click="hideToBackground"
           >
             <ChevronRight :size="18" />
           </button>
@@ -761,7 +856,18 @@ onBeforeUnmount(() => {
   top: 16px;
   right: 16px;
   z-index: 20;
+  pointer-events: none;
+  opacity: 0.72;
+  transform: translateX(8px);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.control-dock.interactive {
   pointer-events: auto;
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .panel-trigger,

@@ -10,6 +10,10 @@ export function Logout():Promise<Record<string, any>>;
 
 export function Register(arg1:string,arg2:string):Promise<Record<string, any>>;
 
+export function SetOverlayBackgroundMode(arg1:boolean):Promise<void>;
+
+export function SetOverlayInteractiveArea(arg1:number,arg2:number,arg3:number,arg4:number,arg5:boolean):Promise<void>;
+
 export function ShowGetMessage(arg1:number,arg2:number):Promise<Record<string, any>>;
 
 export function ShowGetTitle(arg1:number,arg2:number):Promise<Record<string, any>>;

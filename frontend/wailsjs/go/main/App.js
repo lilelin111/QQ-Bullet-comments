@@ -18,6 +18,14 @@ export function Register(arg1, arg2) {
   return window['go']['main']['App']['Register'](arg1, arg2);
 }
 
+export function SetOverlayBackgroundMode(arg1) {
+  return window['go']['main']['App']['SetOverlayBackgroundMode'](arg1);
+}
+
+export function SetOverlayInteractiveArea(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['SetOverlayInteractiveArea'](arg1, arg2, arg3, arg4, arg5);
+}
+
 export function ShowGetMessage(arg1, arg2) {
   return window['go']['main']['App']['ShowGetMessage'](arg1, arg2);
 }

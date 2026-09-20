@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -15,6 +16,7 @@ import (
 
 const (
 	overlayWindowsTitle = "QQ桌面弹幕"
+	overlayWindowsClass = "wailsWindow"
 	wmHotKey            = 0x0312       //定义windows热键消息编号
 	modAlt              = 0x0001       //定义Alt修饰键
 	modControl          = 0x0002       //定义Ctrl键
@@ -23,25 +25,57 @@ const (
 	KeyD                = 0x44         //定义字母D的虚拟键码
 	wsExLayered         = 0x00080000   //定义窗口分层扩展样式，保持窗口透明能力
 	wsExTransparent     = 0x00000020   //定义窗口鼠标穿透扩展样式
+	wsExToolWindow      = 0x00000080   //定义工具窗口样式，隐藏任务栏入口
+	wsExAppWindow       = 0x00040000   //定义应用窗口样式，显示任务栏入口
 	swpNopSize          = 0x0001       //定义窗口尺寸不变
 	swpNoMove           = 0x0002       //定义保持窗口位置不变
 	swpNoZOrder         = 0x0004       //定义保持窗口Z顺序不变
 	swpNoActivate       = 0x0010       //定义修改窗口样式时不激活窗口
 	swpFrameChanged     = 0x0020       //定义通知系统重新计算窗口边框
 	gwlExStyle          = ^uintptr(19) //定义GWL_EXSTYLE 的数值，对应-20
+	whMouseLL           = 14           //定义低级鼠标钩子类型
 )
 
 var (
-	overlayUser32        = windows.NewLazySystemDLL("user32.dll")       //加载Windows user 32.dll
-	procFindWindow       = overlayUser32.NewProc("FindWindowW")         //加载FindWindows函数
-	procGetWindowLongPtr = overlayUser32.NewProc("GetWindowLongPtrW")   //加载GetWindowLongPtrW函数
-	procSetWindowLongPtr = overlayUser32.NewProc("SetWindowLongPtrW")   //加载SetWindowLongPtrW函数
-	procSetWindowPos     = overlayUser32.NewProc("SetWindowPos")        //加载SetWindowPos函数
-	procRegisterHotKey   = overlayUser32.NewProc("RegisterHotKey")      //加载RegisterHotKey函数
-	procUnregisterHotKey = overlayUser32.NewProc("UnregisterHotKey")    //加载UnregisterHotKey函数
-	procGetMessage       = overlayUser32.NewProc("GetMessageW")         //加载 GetMessageW函数
-	procSetForegroundWnd = overlayUser32.NewProc("SetForegroundWindow") //加载SetForegroundWindow函数
+	overlayUser32         = windows.NewLazySystemDLL("user32.dll")       //加载Windows user 32.dll
+	procFindWindow        = overlayUser32.NewProc("FindWindowW")         //加载FindWindows函数
+	procGetWindowLongPtr  = overlayUser32.NewProc("GetWindowLongPtrW")   //加载GetWindowLongPtrW函数
+	procSetWindowLongPtr  = overlayUser32.NewProc("SetWindowLongPtrW")   //加载SetWindowLongPtrW函数
+	procSetWindowPos      = overlayUser32.NewProc("SetWindowPos")        //加载SetWindowPos函数
+	procRegisterHotKey    = overlayUser32.NewProc("RegisterHotKey")      //加载RegisterHotKey函数
+	procUnregisterHotKey  = overlayUser32.NewProc("UnregisterHotKey")    //加载UnregisterHotKey函数
+	procGetMessage        = overlayUser32.NewProc("GetMessageW")         //加载 GetMessageW函数
+	procSetForegroundWnd  = overlayUser32.NewProc("SetForegroundWindow") //加载SetForegroundWindow函数
+	procSetWindowsHookEx  = overlayUser32.NewProc("SetWindowsHookExW")   //加载SetWindowsHookExW函数
+	procCallNextHookEx    = overlayUser32.NewProc("CallNextHookEx")      //加载CallNextHookEx函数
+	procUnhookWindowsHook = overlayUser32.NewProc("UnhookWindowsHookEx") //加载UnhookWindowsHookEx函数
+	procClientToScreen    = overlayUser32.NewProc("ClientToScreen")      //加载ClientToScreen函数
+	procGetCursorPos      = overlayUser32.NewProc("GetCursorPos")        //加载GetCursorPos函数
+)
 
+type overlayMouseHookData struct {
+	point       winPoint //保存鼠标屏幕坐标
+	mouseData   uint32   //保存鼠标附加数据
+	flags       uint32   //保存鼠标事件标志
+	time        uint32   //保存鼠标事件时间
+	dwExtraInfo uintptr  //保存系统附加信息
+}
+
+type overlayInteractiveArea struct {
+	left    int32 //保存交互区域左边界
+	top     int32 //保存交互区域上边界
+	right   int32 //保存交互区域右边界
+	bottom  int32 //保存交互区域下边界
+	visible bool  //保存交互区域是否启用
+}
+
+var (
+	overlayHWND           atomic.Uintptr                         //保存弹幕窗口句柄
+	overlayArea           atomic.Pointer[overlayInteractiveArea] //保存控制面板交互区域
+	overlayAreaSpec       atomic.Pointer[overlayInteractiveArea] //保存前端上报的相对交互区域
+	overlayPassThrough    atomic.Bool                            //保存当前鼠标穿透状态
+	overlayStyleReady     atomic.Bool                            //保存窗口样式是否已经初始化
+	manualInteractiveMode atomic.Bool                            //保存手动交互模式状态
 )
 
 type winPoint struct {
@@ -58,80 +92,242 @@ type winMsg struct {
 	LPrivate uint32   //保存私有参数
 }
 
+var overlayMouseHookProc = windows.NewCallback(func(nCode, wParam, lParam uintptr) uintptr {
+	if int32(nCode) >= 0 && lParam != 0 && !manualInteractiveMode.Load() {
+		data := (*overlayMouseHookData)(unsafe.Pointer(lParam))
+		updateOverlayInteraction(data.point.x, data.point.y)
+	}
+
+	result, _, _ := procCallNextHookEx.Call(0, nCode, wParam, lParam)
+	return result
+})
+
 func startOverlayIntegration(ctx context.Context) {
 	go func() {
-		hwnd := waitForOverlayWindows(ctx) //获取标识符
+		hwnd := waitForOverlayWindows(ctx)
 		if hwnd == 0 {
-			fmt.Println("未找到窗口，鼠标穿透未启用！")
+			fmt.Println("未找到窗口，鼠标穿透未启用")
 			return
 		}
-		runtime.LockOSThread()         //锁定为独立操作系统
-		defer runtime.UnlockOSThread() //释放
-		//注册 Ctrl，Alt，D，全局快捷键
+
+		overlayHWND.Store(hwnd)
+
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		var module windows.Handle
+		err := windows.GetModuleHandleEx(
+			windows.GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			nil,
+			&module,
+		)
+		if err != nil {
+			fmt.Println("获取程序模块失败:", err)
+			return
+		}
+
+		hook, _, callErr := procSetWindowsHookEx.Call(
+			whMouseLL,
+			overlayMouseHookProc,
+			uintptr(module),
+			0,
+		)
+		if hook == 0 {
+			fmt.Println("安装鼠标交互钩子失败:", winCallError(callErr))
+			return
+		}
+		defer procUnhookWindowsHook.Call(hook)
+
+		if err := setOverlayClickThrough(hwnd, true); err != nil {
+			fmt.Println("启用鼠标穿透失败:", err)
+			return
+		}
+
+		if spec := overlayAreaSpec.Load(); spec != nil {
+			applyOverlayArea(hwnd, spec)
+		}
+
 		ok, _, callErr := procRegisterHotKey.Call(
-			0, //进当前线程
+			0,
 			hotKeyID,
-			modControl|modAlt|modNoRepeat, //禁止重复
+			modControl|modAlt|modNoRepeat,
 			KeyD,
 		)
-		if ok == 0 {
-			fmt.Println("全局快捷键注册失败！", winCallError(callErr))
-			return
+		if ok != 0 {
+			defer procUnregisterHotKey.Call(0, hotKeyID)
+		} else {
+			fmt.Println("全局快捷键注册失败，仍可使用面板自动交互:", winCallError(callErr))
 		}
-		defer procUnregisterHotKey.Call(0, hotKeyID) //函数退出时注销快捷键
-		err := setOverlayClickThrough(hwnd, true)    //启用鼠标穿透
-		if err != nil {
-			fmt.Println("启动鼠标穿透失败！")
-			return
-		}
-		fmt.Println("鼠标穿透已经启用，按Ctrl+Alt+D切换模式")
-		enabled := true //记录是否实在鼠标穿透状态
+
+		fmt.Println("鼠标穿透已启用，移到控制面板会自动进入交互")
+
 		var msg winMsg
 		for {
 			ret, _, callErr := procGetMessage.Call(
-				// 传入消息结构体地址。
 				uintptr(unsafe.Pointer(&msg)),
-				// 接收所有窗口句柄的消息。
 				0,
-				// 不限制最小消息编号。
 				0,
-				// 不限制最大消息编号。
 				0,
 			)
 			if int32(ret) == -1 {
-				//输出消息循环错误
-				fmt.Println("读取快捷消息失败!", winCallError(callErr))
+				fmt.Println("读取系统消息失败:", winCallError(callErr))
 				return
 			}
-			//结束消息循环
 			if ret == 0 {
 				return
 			}
 			if msg.Message != wmHotKey || msg.WParam != hotKeyID {
-				//读下一条消息
 				continue
 			}
-			enabled = !enabled
-			err := setOverlayClickThrough(hwnd, enabled) //启用鼠标穿透
-			if err != nil {
-				fmt.Println("启动鼠标穿透失败！")
-				continue
-			}
-			if enabled {
-				fmt.Println("鼠标穿透已经打开！")
-			} else {
-				//可以操作面板
-				fmt.Println("鼠标穿透已经关闭，可以操作面板！")
-				procSetForegroundWnd.Call(hwnd) //弹幕窗口切换为前台
-			}
+
+			manualInteractiveMode.Store(!manualInteractiveMode.Load())
+			refreshOverlayInteraction(hwnd)
 		}
 	}()
+}
+
+func (a *App) SetOverlayInteractiveArea(
+	x int,
+	y int,
+	width int,
+	height int,
+	visible bool,
+) {
+	if width <= 0 || height <= 0 {
+		visible = false
+	}
+
+	spec := &overlayInteractiveArea{
+		left:    int32(x),
+		top:     int32(y),
+		right:   int32(x + width),
+		bottom:  int32(y + height),
+		visible: visible,
+	}
+	overlayAreaSpec.Store(spec)
+
+	hwnd := overlayHWND.Load()
+	if hwnd == 0 {
+		return
+	}
+
+	applyOverlayArea(hwnd, spec)
+}
+
+func (a *App) SetOverlayBackgroundMode(enabled bool) error {
+	hwnd := overlayHWND.Load()
+	if hwnd == 0 {
+		return nil
+	}
+
+	style, _, callErr := procGetWindowLongPtr.Call(hwnd, gwlExStyle)
+	if style == 0 && !winCallOk(callErr) {
+		return winCallError(callErr)
+	}
+
+	newStyle := style
+	if enabled {
+		newStyle |= wsExToolWindow
+		newStyle &^= wsExAppWindow
+	} else {
+		newStyle &^= wsExToolWindow
+		newStyle |= wsExAppWindow
+	}
+
+	if newStyle != style {
+		previous, _, callErr := procSetWindowLongPtr.Call(
+			hwnd,
+			gwlExStyle,
+			newStyle,
+		)
+		if previous == 0 && !winCallOk(callErr) {
+			return winCallError(callErr)
+		}
+	}
+
+	ok, _, callErr := procSetWindowPos.Call(
+		hwnd,
+		0,
+		0,
+		0,
+		0,
+		0,
+		swpNoMove|swpNopSize|swpNoZOrder|swpNoActivate|swpFrameChanged,
+	)
+	if ok == 0 {
+		return winCallError(callErr)
+	}
+
+	return nil
+}
+
+func applyOverlayArea(hwnd uintptr, spec *overlayInteractiveArea) {
+	var origin winPoint
+	ok, _, _ := procClientToScreen.Call(
+		hwnd,
+		uintptr(unsafe.Pointer(&origin)),
+	)
+	if ok == 0 {
+		return
+	}
+
+	overlayArea.Store(&overlayInteractiveArea{
+		left:    origin.x + spec.left,
+		top:     origin.y + spec.top,
+		right:   origin.x + spec.right,
+		bottom:  origin.y + spec.bottom,
+		visible: spec.visible,
+	})
+
+	refreshOverlayInteraction(hwnd)
+}
+
+func refreshOverlayInteraction(hwnd uintptr) {
+	if manualInteractiveMode.Load() {
+		if err := setOverlayClickThrough(hwnd, false); err == nil {
+			procSetForegroundWnd.Call(hwnd)
+		}
+		return
+	}
+
+	var point winPoint
+	ok, _, _ := procGetCursorPos.Call(uintptr(unsafe.Pointer(&point)))
+	if ok != 0 {
+		updateOverlayInteraction(point.x, point.y)
+	}
+}
+
+func updateOverlayInteraction(x int32, y int32) {
+	hwnd := overlayHWND.Load()
+	if hwnd == 0 {
+		return
+	}
+
+	area := overlayArea.Load()
+	interactive := area != nil &&
+		area.visible &&
+		x >= area.left &&
+		x < area.right &&
+		y >= area.top &&
+		y < area.bottom
+
+	previousPassThrough := overlayPassThrough.Load()
+	styleReady := overlayStyleReady.Load()
+
+	if err := setOverlayClickThrough(hwnd, !interactive); err != nil {
+		return
+	}
+
+	if interactive && (!styleReady || previousPassThrough) {
+		procSetForegroundWnd.Call(hwnd)
+	}
 }
 
 // uintptr 是 Go 语言中一个专门用于底层系统编程的特殊整数类型，
 // 它的核心作用是安全地存储指针的内存地址值。
 func waitForOverlayWindows(ctx context.Context) uintptr {
 	title, _ := windows.UTF16PtrFromString(overlayWindowsTitle)
+	className, _ := windows.UTF16PtrFromString(overlayWindowsClass)
 	//转化成 Windows UTF-8字符串
 	ticker := time.NewTicker(100 * time.Millisecond)
 	//100毫秒的计时器
@@ -139,8 +335,8 @@ func waitForOverlayWindows(ctx context.Context) uintptr {
 	//函数结束释放计时器
 	for {
 		hwnd, _, _ := procFindWindow.Call( //找窗口标识符
-			0,                              //不限制窗口类型
-			uintptr(unsafe.Pointer(title))) //传入指针
+			uintptr(unsafe.Pointer(className)), //指定 Wails 窗口类
+			uintptr(unsafe.Pointer(title)))     //传入指针
 		if hwnd != 0 {
 			return hwnd //找到了
 		}
@@ -152,6 +348,10 @@ func waitForOverlayWindows(ctx context.Context) uintptr {
 	}
 }
 func setOverlayClickThrough(hwnd uintptr, enabled bool) error {
+	if overlayStyleReady.Load() && overlayPassThrough.Load() == enabled {
+		return nil
+	}
+
 	style, _, callErr := procGetWindowLongPtr.Call(hwnd, gwlExStyle)
 	//读取扩展模式
 	if style == 0 && !winCallOk(callErr) {
@@ -193,6 +393,9 @@ func setOverlayClickThrough(hwnd uintptr, enabled bool) error {
 	if ok == 0 {
 		return winCallError(callErr)
 	}
+
+	overlayPassThrough.Store(enabled)
+	overlayStyleReady.Store(true)
 	return nil
 }
 func winCallOk(err error) bool {
