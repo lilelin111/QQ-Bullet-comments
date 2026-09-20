@@ -55,6 +55,7 @@ func main() {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	startOverlayIntegration(ctx)
 	exePath, err := os.Executable()
 	if err != nil {
 		println("获取程序路径失败:", err.Error())

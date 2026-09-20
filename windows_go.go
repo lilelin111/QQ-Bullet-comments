@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -17,7 +18,7 @@ const (
 	wmHotKey            = 0x0312       //定义windows热键消息编号
 	modAlt              = 0x0001       //定义Alt修饰键
 	modControl          = 0x0002       //定义Ctrl键
-	modNoRepeat         = 0x400        //定义按住热键时不重复触发的标志
+	modNoRepeat         = 0x4000       //定义按住热键时不重复触发的标志
 	hotKeyID            = 1            //定义当前全局热键唯一的编号
 	KeyD                = 0x44         //定义字母D的虚拟键码
 	wsExLayered         = 0x00080000   //定义窗口分层扩展样式，保持窗口透明能力
@@ -38,7 +39,7 @@ var (
 	procSetWindowPos     = overlayUser32.NewProc("SetWindowPos")        //加载SetWindowPos函数
 	procRegisterHotKey   = overlayUser32.NewProc("RegisterHotKey")      //加载RegisterHotKey函数
 	procUnregisterHotKey = overlayUser32.NewProc("UnregisterHotKey")    //加载UnregisterHotKey函数
-	procGetMessage       = overlayUser32.NewProc(" GetMessageW")        //加载 GetMessageW函数
+	procGetMessage       = overlayUser32.NewProc("GetMessageW")         //加载 GetMessageW函数
 	procSetForegroundWnd = overlayUser32.NewProc("SetForegroundWindow") //加载SetForegroundWindow函数
 
 )
@@ -59,17 +60,71 @@ type winMsg struct {
 
 func startOverlayIntegration(ctx context.Context) {
 	go func() {
-		hwnd := waitForOverlayWindows(ctx)
+		hwnd := waitForOverlayWindows(ctx) //获取标识符
 		if hwnd == 0 {
 			fmt.Println("未找到窗口，鼠标穿透未启用！")
 			return
 		}
-		err := setOverlayClickThrough(hwnd, true)
+		runtime.LockOSThread()         //锁定为独立操作系统
+		defer runtime.UnlockOSThread() //释放
+		//注册 Ctrl，Alt，D，全局快捷键
+		ok, _, callErr := procRegisterHotKey.Call(
+			0, //进当前线程
+			hotKeyID,
+			modControl|modAlt|modNoRepeat, //禁止重复
+			KeyD,
+		)
+		if ok == 0 {
+			fmt.Println("全局快捷键注册失败！", winCallError(callErr))
+			return
+		}
+		defer procUnregisterHotKey.Call(0, hotKeyID) //函数退出时注销快捷键
+		err := setOverlayClickThrough(hwnd, true)    //启用鼠标穿透
 		if err != nil {
 			fmt.Println("启动鼠标穿透失败！")
 			return
 		}
-
+		fmt.Println("鼠标穿透已经启用，按Ctrl+Alt+D切换模式")
+		enabled := true //记录是否实在鼠标穿透状态
+		var msg winMsg
+		for {
+			ret, _, callErr := procGetMessage.Call(
+				// 传入消息结构体地址。
+				uintptr(unsafe.Pointer(&msg)),
+				// 接收所有窗口句柄的消息。
+				0,
+				// 不限制最小消息编号。
+				0,
+				// 不限制最大消息编号。
+				0,
+			)
+			if int32(ret) == -1 {
+				//输出消息循环错误
+				fmt.Println("读取快捷消息失败!", winCallError(callErr))
+				return
+			}
+			//结束消息循环
+			if ret == 0 {
+				return
+			}
+			if msg.Message != wmHotKey || msg.WParam != hotKeyID {
+				//读下一条消息
+				continue
+			}
+			enabled = !enabled
+			err := setOverlayClickThrough(hwnd, enabled) //启用鼠标穿透
+			if err != nil {
+				fmt.Println("启动鼠标穿透失败！")
+				continue
+			}
+			if enabled {
+				fmt.Println("鼠标穿透已经打开！")
+			} else {
+				//可以操作面板
+				fmt.Println("鼠标穿透已经关闭，可以操作面板！")
+				procSetForegroundWnd.Call(hwnd) //弹幕窗口切换为前台
+			}
+		}
 	}()
 }
 
@@ -109,7 +164,7 @@ func setOverlayClickThrough(hwnd uintptr, enabled bool) error {
 		newstyle |= wsExLayered | wsExTransparent
 	} else {
 		//移除鼠标穿透样式，保留分层
-		newstyle &^= wsExLayered
+		newstyle &^= wsExTransparent
 	}
 	//窗口是否发生变化
 	if newstyle != style {
@@ -153,7 +208,7 @@ func winCallOk(err error) bool {
 	return false
 }
 func winCallError(err error) error {
-	//是否调用成功
+	//错误是否表示调用成功
 	if winCallOk(err) {
 		return nil
 	}
