@@ -214,26 +214,29 @@ func (a *App) SetOverlayInteractiveArea(
 	applyOverlayArea(hwnd, spec)
 }
 
+// 切换后台模式
 func (a *App) SetOverlayBackgroundMode(enabled bool) error {
-	hwnd := overlayHWND.Load()
+	hwnd := overlayHWND.Load() //读取标识符
 	if hwnd == 0 {
-		return nil
+		return nil //没初始化直接返回
 	}
-
+	//调用win32
 	style, _, callErr := procGetWindowLongPtr.Call(hwnd, gwlExStyle)
 	if style == 0 && !winCallOk(callErr) {
 		return winCallError(callErr)
 	}
-
+	//复制
 	newStyle := style
+	//隐藏任务栏和ALT+TAB入口
 	if enabled {
+		//挂后台
 		newStyle |= wsExToolWindow
 		newStyle &^= wsExAppWindow
 	} else {
 		newStyle &^= wsExToolWindow
 		newStyle |= wsExAppWindow
 	}
-
+	//减少窗口刷新
 	if newStyle != style {
 		previous, _, callErr := procSetWindowLongPtr.Call(
 			hwnd,
@@ -244,7 +247,8 @@ func (a *App) SetOverlayBackgroundMode(enabled bool) error {
 			return winCallError(callErr)
 		}
 	}
-
+	//通知Windows
+	//不移动，不缩放，刷新窗口
 	ok, _, callErr := procSetWindowPos.Call(
 		hwnd,
 		0,

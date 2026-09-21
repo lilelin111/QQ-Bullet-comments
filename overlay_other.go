@@ -11,6 +11,7 @@ func startOverlayIntegration(ctx context.Context) {
 	// 非 Windows 平台不启用系统级鼠标穿透。
 }
 
+// 非windows系统不启用鼠标穿透
 func (a *App) SetOverlayInteractiveArea(
 	x int,
 	y int,

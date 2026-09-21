@@ -44,6 +44,8 @@ func main() {
 		OnStartup: func(ctx context.Context) {
 			app.startup(ctx)
 		},
+		//回调函数。触发条件：前端加载完成
+		//否则可能会在鼠标穿透的时候会阻拦其他的操作,会一直穿透
 		OnDomReady: func(ctx context.Context) {
 			startOverlayIntegration(ctx)
 		},
