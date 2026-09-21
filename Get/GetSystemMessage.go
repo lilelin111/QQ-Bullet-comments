@@ -15,6 +15,10 @@ import (
 // 通过 Windows 通知中心的 UserNotificationListener 拉取通知，
 // 输出格式：通知ID<TAB>时间<TAB>标题/正文，并只保留 QQ 相关通知。
 const queryScript = `
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+
 $listenerType = [Windows.UI.Notifications.Management.UserNotificationListener, Windows.UI.Notifications.Management, ContentType = WindowsRuntime]
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 
