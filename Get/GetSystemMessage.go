@@ -1,4 +1,9 @@
+//go:build windows
+
+// 只在 Windows 系统编译这个文件。
 package Get
+
+// 声明当前文件属于 Get 包。
 
 import (
 	"bufio"
@@ -100,13 +105,6 @@ var (
 	seen       = make(map[string]bool) // seen：记录“已经处理过”的通知 ID
 	maxSeenCap = 10000
 )
-
-type QQMessage struct {
-	NotificationID string `json:"notification_id"` //通知ID
-	Time           string `json:"time"`            //通知时间
-	Title          string `json:"title"`           //群名
-	Body           string `json:"body"`            //通知内容
-}
 
 // 分隔信息
 func parseLine(line string) (QQMessage, bool) {
