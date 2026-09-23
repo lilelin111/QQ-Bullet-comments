@@ -1,11 +1,15 @@
 package Get
 
 import (
-	"context"
-	"encoding/json"
-	"sync"
-	"time"
+	"context"       //取消监听，控制程序退出
+	"encoding/json" //分析oneBot发来的JSON格式事件
+	"net/http"      //给webSocket握手请求加鉴权头
+	"os"            //读取环境变量配置
+	"sync"          //互斥锁
+	"time"          //时间，例如：查询时间循环
 )
+
+//oneBot是一个标准化的聊天软件接口协议
 
 var (
 	oneBotMu      sync.Mutex                  //互斥锁
@@ -30,6 +34,20 @@ type oneBotEvent struct {
 	} `json:"sender"`
 }
 
+// 连接oneBot webSocket 服务
+// webSocket是一种全双工通信协议，服务端主动推送消息
+func connectOneBot(ctx context.Context) {
+	endpoint := os.Getenv("QQ_DANMAKU_OUEBOT_WS") //读取webSocket地主之的环境变量
+	if endpoint == "" {
+		endpoint = "ws://127.0.0.1:3001/" //默认地址
+	}
+	header := http.Header{}                       //创建请求头
+	token := os.Getenv("QQ_DANMAKU_OUEBOT_TOKEN") //访问令牌
+	if token != "" {
+		header.Set("Authorization", "Bearer "+token)
+		//设置令牌
+	}
+}
 func startOneBot(ctx context.Context) {
 	oneBotMu.Lock() //启动监听
 	if oneBotRunning {
