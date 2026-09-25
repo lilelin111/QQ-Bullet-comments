@@ -131,6 +131,19 @@ func startOneBot(ctx context.Context) {
 	}
 }
 func NextMessages(ctx context.Context, interval time.Duration) ([]QQMessage, error) {
-	startOneBot(ctx)
-
+	startOneBot(ctx)                 //读取下一条消息
+	timer := time.NewTimer(interval) //轮循
+	defer timer.Stop()               //释放
+	for {
+		select {
+		case message := <-oneBotQueue: //判断是否有消息
+			return []QQMessage{message}, nil//返回给上层循环
+		}
+		case err:=<-oneBotErrors:
+			return nil, err
+		case <-timer.C://判断是否到轮循时间
+			timer.Reset(interval)
+		case <-ctx.Done():
+			return nil, ctx.Err()//返回上下文错误
+	}
 }
