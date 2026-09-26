@@ -7,6 +7,7 @@ import (
 	"net/http" //给webSocket握手请求加鉴权头
 	"os"       //读取环境变量配置
 	"strconv"
+	"strings"
 	"sync" //互斥锁
 	"time" //时间，例如：查询时间循环
 
@@ -160,9 +161,34 @@ func NextMessage1(ctx context.Context, interval time.Duration) (QQMessage, error
 	return message[0], nil
 }
 func oneBotText(raw json.RawMessage) string {
-
+	var text string
+	//文本变量
+	if json.Unmarshal(raw, &text) != nil {
+		return strings.TrimSpace(text)
+	}
+	//消息类型
+	var segments []struct {
+		Type string            `json:"type"`
+		Data map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &segments); err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	var parts []string
+	for _, segment := range segments {
+		switch segment.Type {
+		case "text":
+			parts = append(parts, segment.Data["text"])
+		case "image":
+			parts = append(parts, "[图片]")
+		case "face":
+			parts = append(parts, "[表情]")
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, ""))
 }
 func oneBotTitle(event oneBotEvent) string {
+	//生成弹幕标题
 	if event.GroupID != 0 {
 		return "群" + strconv.FormatInt(event.GroupID, 10)
 	}
@@ -170,13 +196,16 @@ func oneBotTitle(event oneBotEvent) string {
 		return event.Sender.Card
 	}
 	if event.Sender.Nickname != "" {
+		//返回昵称
 		return event.Sender.Nickname
 	}
 	return "QQ消息"
 }
 func formatOneBotTime(timestamp int64) string {
 	if timestamp == 0 {
+		//格式化时间
 		return time.Now().Format("2006-01-02 15:04:05")
 	}
+	//转化Unix时间字符
 	return time.Unix(timestamp, 0).Local().Format("2006-01-02 15:04:05")
 }
