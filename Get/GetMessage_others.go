@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"net/http" //给webSocket握手请求加鉴权头
 	"os"       //读取环境变量配置
-	"sync"     //互斥锁
-	"time"     //时间，例如：查询时间循环
+	"strconv"
+	"sync" //互斥锁
+	"time" //时间，例如：查询时间循环
 
 	"github.com/gorilla/websocket"
 )
@@ -130,20 +131,52 @@ func startOneBot(ctx context.Context) {
 		time.Sleep(3 * time.Second) //3秒刷新
 	}
 }
-func NextMessages(ctx context.Context, interval time.Duration) ([]QQMessage, error) {
+func NextMessages1(ctx context.Context, interval time.Duration) ([]QQMessage, error) {
 	startOneBot(ctx)                 //读取下一条消息
 	timer := time.NewTimer(interval) //轮循
 	defer timer.Stop()               //释放
 	for {
 		select {
 		case message := <-oneBotQueue: //判断是否有消息
-			return []QQMessage{message}, nil//返回给上层循环
-		}
-		case err:=<-oneBotErrors:
+			return []QQMessage{message}, nil //返回给上层循环
+
+		case err := <-oneBotErrors:
 			return nil, err
-		case <-timer.C://判断是否到轮循时间
+		case <-timer.C: //判断是否到轮循时间
 			timer.Reset(interval)
 		case <-ctx.Done():
-			return nil, ctx.Err()//返回上下文错误
+			return nil, ctx.Err() //返回上下文错误
+		}
 	}
+}
+func NextMessage1(ctx context.Context, interval time.Duration) (QQMessage, error) {
+	message, err := NextMessages1(ctx, interval)
+	if err != nil {
+		return QQMessage{}, err
+	}
+	if len(message) == 0 {
+		return QQMessage{}, fmt.Errorf("没有新的QQ消息")
+	}
+	return message[0], nil
+}
+func oneBotText(raw json.RawMessage) string {
+
+}
+func oneBotTitle(event oneBotEvent) string {
+	if event.GroupID != 0 {
+		return "群" + strconv.FormatInt(event.GroupID, 10)
+	}
+	if event.Sender.Card != "" {
+		return event.Sender.Card
+	}
+	if event.Sender.Nickname != "" {
+		return event.Sender.Nickname
+	}
+	return "QQ消息"
+}
+func formatOneBotTime(timestamp int64) string {
+	if timestamp == 0 {
+		return time.Now().Format("2006-01-02 15:04:05")
+	}
+	return time.Unix(timestamp, 0).Local().Format("2006-01-02 15:04:05")
 }
