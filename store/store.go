@@ -38,7 +38,9 @@ type Message struct {
 func init() {
 	initStoragePaths()
 	LoadUser()
-	LoadMessage()
+	if err := LoadMessage(); err != nil {
+		fmt.Println("加载数据失败！", err)
+	}
 }
 
 func initStoragePaths() {
@@ -102,15 +104,29 @@ func SaveUser() error {
 func LoadMessage() error {
 	data, err := os.ReadFile(messageFilePath)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
+		if os.IsNotExist(err) {
+			Messages = []Message{}
+			return nil
 		}
-	}
-	err = json.Unmarshal(data, &Message{})
-	if err != nil {
 		return err
 	}
-	return nil
+	if len(bytes.TrimSpace(data)) == 0 {
+		Messages = []Message{}
+		return nil
+	}
+	if err := json.Unmarshal(data, &Messages); err == nil {
+		if Messages == nil {
+			Messages = []Message{}
+		}
+		return nil
+	}
+	var legacy Message
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		Messages = []Message{}
+		return nil
+	}
+	return fmt.Errorf("消息格式错误！")
+
 }
 func SaveMessage() error {
 	data, err := json.MarshalIndent(Message{}, "", " ")
