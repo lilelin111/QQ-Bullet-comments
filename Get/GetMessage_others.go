@@ -1,3 +1,5 @@
+//go:build !windows
+
 package Get
 
 import (
@@ -39,15 +41,19 @@ type oneBotEvent struct {
 	} `json:"sender"`
 }
 
+func PrimeSeen() {
+	// 非 Windows 的 OneBot 是实时消息源，没有历史通知需要预标记。
+}
+
 // 连接oneBot webSocket 服务
 // webSocket是一种全双工通信协议，服务端主动推送消息
 func connectOneBot(ctx context.Context) error {
-	endpoint := os.Getenv("QQ_DANMAKU_OUEBOT_WS") //读取webSocket地主之的环境变量
+	endpoint := os.Getenv("QQ_DANMAKU_ONEBOT_WS") //读取webSocket地主之的环境变量
 	if endpoint == "" {
 		endpoint = "ws://127.0.0.1:3001/" //默认地址
 	}
 	header := http.Header{}                       //创建请求头
-	token := os.Getenv("QQ_DANMAKU_OUEBOT_TOKEN") //访问令牌
+	token := os.Getenv("QQ_DANMAKU_ONEBOT_TOKEN") //访问令牌
 	if token != "" {
 		header.Set("Authorization", "Bearer "+token)
 		//设置令牌
@@ -117,22 +123,22 @@ func startOneBot(ctx context.Context) {
 			oneBotRunning = false //设置状态
 			oneBotMu.Unlock()
 		}()
-	}()
-	for {
-		err := connectOneBot(ctx) //连接oneBot并堵塞运行
-		if ctx.Err() != nil {
-			return //上下文取消时退出
-		}
-		if err != nil {
-			select {
-			case oneBotErrors <- err:
-			default:
+		for {
+			err := connectOneBot(ctx) //连接oneBot并堵塞运行
+			if ctx.Err() != nil {
+				return //上下文取消时退出
 			}
+			if err != nil {
+				select {
+				case oneBotErrors <- err:
+				default:
+				}
+			}
+			time.Sleep(3 * time.Second) //3秒刷新
 		}
-		time.Sleep(3 * time.Second) //3秒刷新
-	}
+	}()
 }
-func NextMessages1(ctx context.Context, interval time.Duration) ([]QQMessage, error) {
+func NextMessages(ctx context.Context, interval time.Duration) ([]QQMessage, error) {
 	startOneBot(ctx)                 //读取下一条消息
 	timer := time.NewTimer(interval) //轮循
 	defer timer.Stop()               //释放
@@ -150,7 +156,7 @@ func NextMessages1(ctx context.Context, interval time.Duration) ([]QQMessage, er
 		}
 	}
 }
-func NextMessage1(ctx context.Context, interval time.Duration) (QQMessage, error) {
+func NextMessage(ctx context.Context, interval time.Duration) (QQMessage, error) {
 	message, err := NextMessages1(ctx, interval)
 	if err != nil {
 		return QQMessage{}, err
@@ -163,7 +169,7 @@ func NextMessage1(ctx context.Context, interval time.Duration) (QQMessage, error
 func oneBotText(raw json.RawMessage) string {
 	var text string
 	//文本变量
-	if json.Unmarshal(raw, &text) != nil {
+	if json.Unmarshal(raw, &text) == nil {
 		return strings.TrimSpace(text)
 	}
 	//消息类型
