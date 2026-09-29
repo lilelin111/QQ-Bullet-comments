@@ -55,28 +55,30 @@ func publicUser(user *store.User) map[string]interface{} {
 	}
 }
 
-func (a *App) CreateMessage(u *store.User) map[string]interface{} {
-	if u == nil || u.ID <= 0 { //检验用户有效性
-		return map[string]interface{}{"success": false, "message": "用户无效，请先登录"}
-	}
-	ctx := a.ctx //获取上下文
-	if ctx == nil {
-		ctx = context.Background() // 降级使用后台上下文，防止panic
-	}
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second) //设置超时，防止堵塞
-	defer cancel()
+/*
+	func (a *App) CreateMessage(u *store.User) map[string]interface{} {
+		if u == nil || u.ID <= 0 { //检验用户有效性
+			return map[string]interface{}{"success": false, "message": "用户无效，请先登录"}
+		}
+		ctx := a.ctx //获取上下文
+		if ctx == nil {
+			ctx = context.Background() // 降级使用后台上下文，防止panic
+		}
+		ctx, cancel := context.WithTimeout(ctx, 90*time.Second) //设置超时，防止堵塞
+		defer cancel()
 
-	msg, err := store.CreateMessages(ctx, u)
-	if err != nil {
-		return map[string]interface{}{"success": false, "message": err.Error()}
+		msg, err := store.CreateMessages(ctx, u)
+		if err != nil {
+			return map[string]interface{}{"success": false, "message": err.Error()}
+		}
+		return map[string]interface{}{
+			"success":    true,
+			"message":    "保存数据成功！",
+			"message_id": msg.ID,
+			"group_name": msg.Title,
+		}
 	}
-	return map[string]interface{}{
-		"success":    true,
-		"message":    "保存数据成功！",
-		"message_id": msg.ID,
-		"group_name": msg.Title,
-	}
-}
+*/
 func (a *App) ShowGetMessage(UserID int64, Id int) map[string]interface{} {
 	message, err := store.ShowGetMessage(UserID, Id)
 	if err != nil {
@@ -117,6 +119,9 @@ func (a *App) startQQMonitor() {
 			}
 			for _, qq := range messages {
 				runtime.EventsEmit(a.ctx, "qq:new-message", qq)
+				if _, err := AppendMessage(currentUserID, qq); err != nil {
+					runtime.EventsEmit(a.ctx, "qq:error", err.Error())
+				}
 			}
 		}
 	}()
@@ -131,14 +136,24 @@ func (a *App) stopQQMonitor() {
 		a.monitorCancel = nil
 	}
 }
-func AppendMessage(UserID int64, qq Get.QQMessage) (*store.Message, error) {
+func AppendMessage(userID int64, qq Get.QQMessage) (*store.Message, error) {
 	newID := int64(1)
 	if len(store.Messages) > 0 {
 		newID = store.Messages[len(store.Messages)-1].ID + 1
 	}
 	message := &store.Message{
-		ID:     newID,
-		Title:  qq.Title,
-		UserId: UserIDID,
+		ID:             newID,
+		UserId:         userID,
+		Title:          qq.Title,
+		Message:        qq.Body,
+		Time:           qq.Time,
+		NotificationID: qq.NotificationID,
 	}
+	store.Messages = append(store.Messages, *message)
+	//写入文件
+	if err := store.SaveMessage(); err != nil {
+		return nil, err
+	}
+
+	return message, nil
 }

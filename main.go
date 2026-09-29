@@ -66,6 +66,6 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 	if err1 := store.CreateDesktopShortcut(exePath); err1 != nil {
-		println("创建桌面快捷方式失败：:", err.Error())
+		println("创建桌面快捷方式失败：:", err1.Error())
 	}
 }

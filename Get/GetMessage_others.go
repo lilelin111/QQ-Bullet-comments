@@ -157,7 +157,7 @@ func NextMessages(ctx context.Context, interval time.Duration) ([]QQMessage, err
 	}
 }
 func NextMessage(ctx context.Context, interval time.Duration) (QQMessage, error) {
-	message, err := NextMessages1(ctx, interval)
+	message, err := NextMessages(ctx, interval)
 	if err != nil {
 		return QQMessage{}, err
 	}

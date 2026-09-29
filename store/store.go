@@ -2,14 +2,11 @@ package store
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"temp-project/Get"
-	"time"
 	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
@@ -121,15 +118,22 @@ func LoadMessage() error {
 		return nil
 	}
 	var legacy Message
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		Messages = []Message{}
+	if err := json.Unmarshal(data, &legacy); err == nil {
+		if legacy.ID == 0 && legacy.Title == "" && legacy.Message == "" {
+			Messages = []Message{}
+		} else {
+			//旧版单条消息转化为消息信息数组
+			Messages = []Message{legacy}
+		}
 		return nil
 	}
 	return fmt.Errorf("消息格式错误！")
 
 }
 func SaveMessage() error {
-	data, err := json.MarshalIndent(Message{}, "", " ")
+	//Message{} 是单条空消息。
+	//Messages 是所有消息的切片。
+	data, err := json.MarshalIndent(Messages, "", " ")
 	if err != nil {
 		return err
 	}
@@ -228,7 +232,7 @@ func LoginService(username, password string) (*User, error) {
 }
 
 // QQ消息
-func CreateMessages(ctx context.Context, u *User) (*Message, error) {
+/*func CreateMessages(ctx context.Context, u *User) (*Message, error) {
 	if u == nil {
 		return nil, errors.New("用户不能为空")
 	}
@@ -257,7 +261,7 @@ func CreateMessages(ctx context.Context, u *User) (*Message, error) {
 		return nil, err1
 	}
 	return message1, nil
-}
+}*/
 
 // 展示QQ消息内容
 func ShowGetMessage(UserID int64, Id int) (string, error) {
