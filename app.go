@@ -131,3 +131,14 @@ func (a *App) stopQQMonitor() {
 		a.monitorCancel = nil
 	}
 }
+func AppendMessage(UserID int64, qq Get.QQMessage) (*store.Message, error) {
+	newID := int64(1)
+	if len(store.Messages) > 0 {
+		newID = store.Messages[len(store.Messages)-1].ID + 1
+	}
+	message := &store.Message{
+		ID:     newID,
+		Title:  qq.Title,
+		UserId: UserIDID,
+	}
+}
