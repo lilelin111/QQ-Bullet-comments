@@ -23,7 +23,7 @@ func (a *App) Register(username, password string) map[string]interface{} {
 		return map[string]interface{}{"success": false, "message": err.Error()}
 	}
 	// 注册成功后启动 QQ 通知监听，确保监听只发生在用户登录之后。
-	a.startQQMonitor()
+	a.startQQMonitor(user.ID)
 	return map[string]interface{}{"success": true, "message": "注册成功!", "user": publicUser(user)}
 }
 
@@ -34,7 +34,7 @@ func (a *App) Login(username, password string) map[string]interface{} {
 		return map[string]interface{}{"success": false, "message": err.Error()}
 	}
 	// 登录成功后启动 QQ 通知监听，未登录时不会查询系统通知。
-	a.startQQMonitor()
+	a.startQQMonitor(user.ID)
 	return map[string]interface{}{"success": true, "message": "登录成功!", "user": publicUser(user)}
 }
 
@@ -93,7 +93,7 @@ func (a *App) ShowGetTitle(UserID int64, Id int) map[string]interface{} {
 	}
 	return map[string]interface{}{"success": true, "message": message}
 }
-func (a *App) startQQMonitor() {
+func (a *App) startQQMonitor(userID int64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -119,8 +119,9 @@ func (a *App) startQQMonitor() {
 			}
 			for _, qq := range messages {
 				runtime.EventsEmit(a.ctx, "qq:new-message", qq)
-				if _, err := AppendMessage(currentUserID, qq); err != nil {
-					runtime.EventsEmit(a.ctx, "qq:error", err.Error())
+				//保存消息
+				if _, err := AppendMessage(userID, qq); err != nil {
+					runtime.EventsEmit(a.ctx, "qq:monitor-error", err.Error())
 				}
 			}
 		}

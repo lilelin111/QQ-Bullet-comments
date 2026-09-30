@@ -266,12 +266,9 @@ func LoginService(username, password string) (*User, error) {
 // 展示QQ消息内容
 func ShowGetMessage(UserID int64, Id int) (string, error) {
 	for _, i := range Messages {
-		if i.UserId == UserID {
-			if Id >= 0 && Id < len(Messages) {
-				msg := fmt.Sprintf("%.5s", Messages[Id].Message)
-				return msg, nil
-			}
+		if i.UserId == UserID && i.ID == int64(Id) {
 		}
+		return limitRunes(i.Message, 5), nil
 	}
 	return "", errors.New("未找到匹配的消息")
 }
@@ -279,11 +276,8 @@ func ShowGetMessage(UserID int64, Id int) (string, error) {
 // 展示QQ消息的标题
 func ShowGetTitle(UserID int64, Id int) (string, error) {
 	for _, i := range Messages {
-		if i.UserId == UserID {
-			if Id >= 0 && Id < len(Messages) {
-				msg := fmt.Sprintf("%.3s", Messages[Id].Title)
-				return msg, nil
-			}
+		if i.UserId == UserID && i.ID == int64(Id) {
+			return limitRunes(i.Title, 3), nil
 		}
 	}
 	return "", errors.New("未找到匹配的消息")
@@ -296,4 +290,15 @@ func GetDesktopPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(homeDir, "Desktop"), nil
+}
+
+// 防止乱码
+func limitRunes(value string, limit int) string {
+	runes := []rune(value)
+	//没超过限制返回原本字符串
+	if len(runes) <= limit {
+		return value
+	}
+	//截断
+	return string(runes[:limit])
 }
