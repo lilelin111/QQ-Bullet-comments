@@ -428,22 +428,17 @@ function scheduleOverlayInteractiveArea() {
 }
 
 async function syncOverlayInteractiveArea() {
-  const app = (window.go || window.__wails__?.go)?.main?.App
-  if (!app?.SetOverlayInteractiveArea) {
-    return
-  }
-
   const target = document.querySelector(
     panelOpen.value ? '.settings-panel' : '.panel-trigger',
   )
   if (!target) {
-    await app.SetOverlayInteractiveArea(0, 0, 0, 0, false)
+    await api.setOverlayInteractiveArea(0, 0, 0, 0, false)
     return
   }
 
   const rect = target.getBoundingClientRect()
   const scale = window.devicePixelRatio || 1
-  await app.SetOverlayInteractiveArea(
+  await api.setOverlayInteractiveArea(
     Math.round(rect.left * scale),
     Math.round(rect.top * scale),
     Math.round(rect.width * scale),
@@ -453,12 +448,7 @@ async function syncOverlayInteractiveArea() {
 }
 
 async function syncOverlayWindowMode() {
-  const app = (window.go || window.__wails__?.go)?.main?.App
-  if (!app?.SetOverlayBackgroundMode) {
-    return
-  }
-
-  await app.SetOverlayBackgroundMode(backgroundMode.value)
+  await api.setOverlayBackgroundMode(backgroundMode.value)
 }
 
 watch(panelOpen, () => {
@@ -500,14 +490,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleViewportChange)
   window.removeEventListener('focus', handleWindowFocus)
   window.removeEventListener('blur', handleWindowBlur)
-  ;(window.go || window.__wails__?.go)?.main?.App?.SetOverlayBackgroundMode?.(false)
-  ;(window.go || window.__wails__?.go)?.main?.App?.SetOverlayInteractiveArea?.(
-    0,
-    0,
-    0,
-    0,
-    false,
-  )
+  api.setOverlayBackgroundMode(false).catch(() => {})
+  api.setOverlayInteractiveArea(0, 0, 0, 0, false).catch(() => {})
   EventsOff('qq:new-message')
   EventsOff('qq:monitor-error')
 })

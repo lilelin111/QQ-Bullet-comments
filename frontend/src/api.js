@@ -1,10 +1,10 @@
-function appApi() {
-  const root = window.go || window.__wails__?.go
-  if (!root?.main?.App) {
-    throw new Error('Wails 后端尚未就绪')
-  }
-  return root.main.App
-}
+import {
+  Login,
+  Logout,
+  Register,
+  SetOverlayBackgroundMode,
+  SetOverlayInteractiveArea,
+} from '../wailsjs/go/main/App'
 
 function publicUser(value) {
   if (!value) {
@@ -27,13 +27,21 @@ function normalize(result) {
 }
 
 export async function register(username, password) {
-  return normalize(await appApi().Register(username, password))
+  return normalize(await Register(username, password))
 }
 
 export async function login(username, password) {
-  return normalize(await appApi().Login(username, password))
+  return normalize(await Login(username, password))
 }
 
 export async function logout() {
-  return normalize(await appApi().Logout())
+  return normalize(await Logout())
+}
+
+export async function setOverlayInteractiveArea(...args) {
+  await SetOverlayInteractiveArea(...args)
+}
+
+export async function setOverlayBackgroundMode(enabled) {
+  await SetOverlayBackgroundMode(enabled)
 }

@@ -116,7 +116,9 @@ func startOneBot(ctx context.Context) {
 		return
 	}
 	oneBotRunning = true //设置锁
-	oneBotMu.Unlock()    //释放
+	oneBotDone = make(chan struct{})
+	done := oneBotDone
+	oneBotMu.Unlock() //释放
 	go func() {
 		defer func() {
 			oneBotMu.Lock()

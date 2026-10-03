@@ -94,13 +94,21 @@ type winMsg struct {
 
 var overlayMouseHookProc = windows.NewCallback(func(nCode, wParam, lParam uintptr) uintptr {
 	if int32(nCode) >= 0 && lParam != 0 && !manualInteractiveMode.Load() {
-		data := (*overlayMouseHookData)(unsafe.Pointer(lParam))
+		data := mouseHookDataFromLParam(lParam)
 		updateOverlayInteraction(data.point.x, data.point.y)
 	}
 
 	result, _, _ := procCallNextHookEx.Call(0, nCode, wParam, lParam)
 	return result
 })
+
+// 把系统回调参数转换成 Go 结构体指针
+// 只对这个受控转换关闭检查。
+//
+//go:nocheckptr
+func mouseHookDataFromLParam(lParam uintptr) *overlayMouseHookData {
+	return (*overlayMouseHookData)(unsafe.Pointer(uintptr(lParam)))
+}
 
 func startOverlayIntegration(ctx context.Context) {
 	go func() {
